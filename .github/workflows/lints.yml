@@ -1,0 +1,20 @@
+on: [push, pull_request]
+name: Lints on nightly toolchain
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+      RUSTDOCFLAGS: "-Z unstable-options --no-run --no-capture --test-builder clippy-driver"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Check Clippy lints
+        run: cargo clippy --verbose --all
+      - name: Check Clippy lints on tests
+        run: cargo clippy --verbose --all --tests
+      - name: Check Clippy lints on doctests
+        run: cargo test --verbose --doc

@@ -1,0 +1,16 @@
+on: [push, pull_request]
+name: Tests with TSAN
+jobs:
+  tsan:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings -C debug_assertions -Zsanitizer=thread"
+      RUSTDOCFLAGS: "-D warnings -C debug_assertions -Zsanitizer=thread"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Run tests
+        run: cargo test --release -Zbuild-std --target=x86_64-unknown-linux-gnu --verbose --all
