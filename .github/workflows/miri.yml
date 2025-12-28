@@ -1,0 +1,16 @@
+on: [push, pull_request]
+name: Miri tests
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings -C debug_assertions"
+      MIRIFLAGS: "-Zmiri-num-cpus=4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run miri tests
+        run: cargo miri test --all
