@@ -1,0 +1,17 @@
+[package]
+name = "appendvec"
+description = "A concurrent append-only container of immutable values"
+version = "0.1.0"
+authors = ["Guillaume Endignoux <ggendx@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gendx/appendvec"
+categories = ["concurrency", "algorithms", "data-structures"]
+keywords = ["concurrent", "append-only", "immutable", "container", "collection"]
+exclude = [".github/*"]
+edition = "2024"
+rust-version = "1.85.0"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--generate-link-to-definition"]
+
+[dependencies]
