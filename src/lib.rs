@@ -42,6 +42,11 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 ///
 /// Because the values are spread over multiple buckets in memory, it's not
 /// possible to obtain a slice to a sequence of items.
+///
+/// This container is [`Send`] and [`Sync`] if and only if `T` is both [`Send`]
+/// and [`Sync`]. Indeed, sharing or sending an [`AppendVec`] allows retrieving
+/// const references to `T` and moving values of type `T` across threads (where
+/// the value is pushed vs. where it is dropped).
 pub struct AppendVec<T> {
     /// Length of the collection.
     len: AtomicUsize,
@@ -52,6 +57,13 @@ pub struct AppendVec<T> {
     /// Lock held during [`push()`](Self::push) operations.
     write_lock: Mutex<()>,
 }
+
+// SAFETY: Sending an AppendVec allows (1) retrieving a &T on another thread and
+// (2) dropping T on another thread.
+unsafe impl<T: Send + Sync> Send for AppendVec<T> {}
+// SAFETY: Sharing an AppendVec allows (1) retrieving a &T on another thread and
+// (2) importing T from another thread, via the push() method.
+unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
 
 impl<T> Default for AppendVec<T> {
     fn default() -> Self {
@@ -552,12 +564,21 @@ impl<T> Index<usize> for AppendVec<T> {
 /// function, it will not iterate over items added afterwards, even on the same
 /// thread. This is to minimize the number of atomic operations, and to allow
 /// implementing [`ExactSizeIterator`].
+///
+/// This is is [`Send`] and [`Sync`] if and only if `T` is [`Sync`], as sharing
+/// or sending this iterator allows retrieving const references to `T`.
 pub struct AppendVecIter<'a, T> {
     inner: &'a AppendVec<T>,
     len: usize,
     index: usize,
     bucket_ptr: *const T,
 }
+
+// SAFETY: Sending an AppendVecIter allows retrieving a &T on another thread.
+unsafe impl<T: Sync> Send for AppendVecIter<'_, T> {}
+// SAFETY: One cannot do much by sharing an AppendVecIter, but at most it would
+// allow retrieving a &T on another thread.
+unsafe impl<T: Sync> Sync for AppendVecIter<'_, T> {}
 
 impl<'a, T> Iterator for AppendVecIter<'a, T> {
     type Item = &'a T;
