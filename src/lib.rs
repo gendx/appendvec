@@ -9,6 +9,7 @@
 )]
 #![cfg_attr(not(test), forbid(clippy::undocumented_unsafe_blocks))]
 
+use crossbeam_utils::CachePadded;
 use std::mem::MaybeUninit;
 use std::ops::Index;
 use std::sync::Mutex;
@@ -49,7 +50,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 /// the value is pushed vs. where it is dropped).
 pub struct AppendVec<T> {
     /// Length of the collection.
-    len: AtomicUsize,
+    len: CachePadded<AtomicUsize>,
     /// Pointers to allocated buckets of growing size, or null for
     /// not-yet-allocated buckets. [`bucket_len()`] gives the constant size of
     /// each bucket.
@@ -86,7 +87,7 @@ impl<T> AppendVec<T> {
     /// ```
     pub fn new() -> Self {
         Self {
-            len: AtomicUsize::new(0),
+            len: CachePadded::new(AtomicUsize::new(0)),
             buckets: [const { AtomicPtr::new(std::ptr::null_mut()) }; usize::BITS as usize],
             write_lock: Mutex::new(()),
         }
@@ -129,7 +130,7 @@ impl<T> AppendVec<T> {
         }
 
         Self {
-            len: AtomicUsize::new(0),
+            len: CachePadded::new(AtomicUsize::new(0)),
             buckets: buckets.map(AtomicPtr::new),
             write_lock: Mutex::new(()),
         }

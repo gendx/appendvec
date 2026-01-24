@@ -15,3 +15,4 @@ rust-version = "1.85.0"
 rustdoc-args = ["--generate-link-to-definition"]
 
 [dependencies]
+crossbeam-utils = "0.8.21"
