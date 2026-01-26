@@ -11,9 +11,9 @@
 
 use crossbeam_utils::CachePadded;
 use std::mem::MaybeUninit;
-use std::ops::Index;
-use std::sync::Mutex;
+use std::ops::{Index, Range};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 /// A concurrent append-only [`Vec`]-like container.
 ///
@@ -236,11 +236,11 @@ impl<T> AppendVec<T> {
     /// writers must wait for this function to complete. However, readers are
     /// free to read items in the meantime.
     ///
-    /// Note that while this internally appends the item at the end of the
-    /// collection, and while a writer lock is internally held during the
-    /// operation, there is no guarantee that the returned index will remain
-    /// the last one (i.e. equal to `self.len() - 1`), as a concurrent write
-    /// may happen immediately afterwards. Beware of
+    /// Note that even though this internally appends the item at the end of the
+    /// collection, and a writer lock is internally held during the operation,
+    /// there is no guarantee that the returned index will remain the last one
+    /// (i.e. equal to `self.len() - 1`), as a concurrent write may happen
+    /// immediately afterwards. Beware of
     /// [TOCTOU](https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use)
     /// bugs!
     ///
@@ -274,18 +274,7 @@ impl<T> AppendVec<T> {
         }
 
         let (bucket, bucket_index) = bucketize(index);
-        let bucket_ptr = {
-            let ptr = self.buckets[bucket].load(Ordering::Relaxed);
-            if !ptr.is_null() {
-                ptr
-            } else {
-                let bucket_len = bucket_len(bucket);
-                let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
-                let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
-                self.buckets[bucket].store(bucket_ptr, Ordering::Relaxed);
-                bucket_ptr
-            }
-        };
+        let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
 
         // SAFETY:
         // - bucket_index * size_of::<T>() fits in an isize, as promised by the
@@ -336,18 +325,7 @@ impl<T> AppendVec<T> {
         assert_ne!(index, Self::MAX_LEN, "AppendVec is full: cannot push");
 
         let (bucket, bucket_index) = bucketize(index);
-        let bucket_ptr = {
-            let ptr = self.buckets[bucket].load(Ordering::Relaxed);
-            if !ptr.is_null() {
-                ptr
-            } else {
-                let bucket_len = bucket_len(bucket);
-                let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
-                let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
-                self.buckets[bucket].store(bucket_ptr, Ordering::Relaxed);
-                bucket_ptr
-            }
-        };
+        let bucket_ptr = self.get_bucket_ptr_mut(bucket);
 
         // SAFETY:
         // - bucket_index * size_of::<T>() fits in an isize, as promised by the
@@ -473,6 +451,240 @@ impl<T> AppendVec<T> {
             bucket_ptr: std::ptr::null(),
         }
     }
+
+    /// Internal function to retrieve the pointer to the given bucket,
+    /// allocating it if it's null.
+    fn get_bucket_ptr_mut(&mut self, bucket: usize) -> *mut T {
+        // SAFETY: The caller passed a mutable reference to self, which confirms
+        // exclusive access.
+        unsafe { self.get_bucket_ptr_raw(bucket) }
+    }
+
+    /// Internal function to retrieve the pointer to the given bucket,
+    /// allocating it if it's null.
+    fn get_bucket_ptr(&self, bucket: usize, _guard: &MutexGuard<()>) -> *mut T {
+        // SAFETY: The caller passed a mutex guard, which confirms exclusive access.
+        unsafe { self.get_bucket_ptr_raw(bucket) }
+    }
+
+    /// Internal function to retrieve the pointer to the given bucket,
+    /// allocating it if it's null.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure exclusive write access to this object (as a new
+    /// bucket may be allocated), by holding a mutable reference to self or
+    /// the write lock.
+    unsafe fn get_bucket_ptr_raw(&self, bucket: usize) -> *mut T {
+        let ptr = self.buckets[bucket].load(Ordering::Relaxed);
+        if !ptr.is_null() {
+            ptr
+        } else {
+            let bucket_len = bucket_len(bucket);
+            let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
+            let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
+            self.buckets[bucket].store(bucket_ptr, Ordering::Relaxed);
+            bucket_ptr
+        }
+    }
+}
+
+impl<T: Copy + Default> AppendVec<T> {
+    /// Adds the given contiguous slice of items to this collection, and returns
+    /// the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Note that there is currently also a [`Copy`] requirement for performance
+    /// reasons when copying the input slice into this collection.
+    ///
+    /// See also [`push()`](Self::push).
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let container = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![123; i];
+    ///     let index = container.push_slice(blob.as_slice());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_slice(&self, slice: &[T]) -> Range<usize> {
+        if slice.is_empty() {
+            return 0..0;
+        }
+
+        let guard = self.write_lock.lock().unwrap();
+
+        let mut index = self.len.load(Ordering::Relaxed);
+        if slice.len() > Self::MAX_LEN - index {
+            // Drop the guard before panicking to avoid poisoning the Mutex.
+            drop(guard);
+            panic!("AppendVec is full: cannot push");
+        }
+
+        loop {
+            let (bucket, bucket_index) = bucketize(index);
+            let bucket_len = bucket_len(bucket);
+            if slice.len() <= bucket_len - bucket_index {
+                break;
+            }
+
+            let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
+            for i in bucket_index..bucket_len {
+                // SAFETY:
+                // - i * size_of::<T>() fits in an isize, as promised by the bucket_len()
+                //   function, with an input index <= Self::MAX_LEN,
+                // - the entire range between bucket_ptr and ptr is derived from one allocation
+                //   of bucket_len items, as 0 <= i < bucket_len.
+                let ptr = unsafe { bucket_ptr.add(i) };
+                // SAFETY:
+                // - ptr is properly aligned, non-null with correct provenance, because it's
+                //   derived from bucket_ptr which is itself aligned as it was allocated from a
+                //   boxed slice of Ts,
+                // - ptr is valid for exclusive writes:
+                //   - the Release store on the length just below ensures that no other thread
+                //     is reading the value at the given index (via safe APIs),
+                //   - the write lock ensures that no other thread is ever obtaining the same
+                //     index, i.e. no other thread is ever writing to this index.
+                unsafe { std::ptr::write(ptr, T::default()) };
+            }
+
+            index = 1 << (bucket + 1);
+        }
+
+        let (bucket, bucket_index) = bucketize(index);
+        debug_assert!(slice.len() <= bucket_len(bucket) - bucket_index);
+        let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
+
+        // SAFETY:
+        // - bucket_index * size_of::<T>() fits in an isize, as promised by the
+        //   bucketize() function, with an input index <= Self::MAX_LEN,
+        // - the entire range between bucket_ptr and ptr is derived from one allocation
+        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        let ptr = unsafe { bucket_ptr.add(bucket_index) };
+        // SAFETY:
+        // - slice.as_ptr() is valid for reading slice.len() items of type T,
+        // - ptr is valid for writing slice.len() items of type T, indeed bucket_index +
+        //   slice.len() <= bucket_len(bucket),
+        // - slice.as_ptr() is properly aligned, as it directly derives from a slice,
+        // - ptr is properly aligned, as it derives from bucket_ptr which is properly
+        //   aligned,
+        // - the memory regions don't overlap, as the input slice is passed as an
+        //   external const reference parameter,
+        // - T is Copy.
+        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
+        self.len.store(index + slice.len(), Ordering::Release);
+
+        drop(guard);
+
+        index..index + slice.len()
+    }
+
+    /// Adds the given contiguous slice of items to this collection, and returns
+    /// the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Note that there is currently also a [`Copy`] requirement for performance
+    /// reasons when copying the input slice into this collection.
+    ///
+    /// Contrary to [`push_slice()`](Self::push_slice), no write lock is held
+    /// internally because this function already takes an exclusive mutable
+    /// reference to this collection.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let mut container = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![123; i];
+    ///     let index = container.push_slice_mut(blob.as_slice());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_slice_mut(&mut self, slice: &[T]) -> Range<usize> {
+        if slice.is_empty() {
+            return 0..0;
+        }
+
+        let mut index = self.len.load(Ordering::Relaxed);
+        assert!(
+            slice.len() <= Self::MAX_LEN - index,
+            "AppendVec is full: cannot push"
+        );
+
+        loop {
+            let (bucket, bucket_index) = bucketize(index);
+            let bucket_len = bucket_len(bucket);
+            if slice.len() <= bucket_len - bucket_index {
+                break;
+            }
+
+            let bucket_ptr = self.get_bucket_ptr_mut(bucket);
+            for i in bucket_index..bucket_len {
+                // SAFETY:
+                // - i * size_of::<T>() fits in an isize, as promised by the bucket_len()
+                //   function, with an input index <= Self::MAX_LEN,
+                // - the entire range between bucket_ptr and ptr is derived from one allocation
+                //   of bucket_len items, as 0 <= i < bucket_len.
+                let ptr = unsafe { bucket_ptr.add(i) };
+                // SAFETY:
+                // - ptr is properly aligned, non-null with correct provenance, because it's
+                //   derived from bucket_ptr which is itself aligned as it was allocated from a
+                //   boxed slice of Ts,
+                // - ptr is valid for exclusive writes as this function takes an exclusive `&mut
+                //   self` parameter.
+                unsafe { std::ptr::write(ptr, T::default()) };
+            }
+
+            index = 1 << (bucket + 1);
+        }
+
+        let (bucket, bucket_index) = bucketize(index);
+        debug_assert!(slice.len() <= bucket_len(bucket) - bucket_index);
+        let bucket_ptr = self.get_bucket_ptr_mut(bucket);
+
+        // SAFETY:
+        // - bucket_index * size_of::<T>() fits in an isize, as promised by the
+        //   bucketize() function, with an input index <= Self::MAX_LEN,
+        // - the entire range between bucket_ptr and ptr is derived from one allocation
+        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        let ptr = unsafe { bucket_ptr.add(bucket_index) };
+        // SAFETY:
+        // - slice.as_ptr() is valid for reading slice.len() items of type T,
+        // - ptr is valid for writing slice.len() items of type T, indeed bucket_index +
+        //   slice.len() <= bucket_len(bucket),
+        // - slice.as_ptr() is properly aligned, as it directly derives from a slice,
+        // - ptr is properly aligned, as it derives from bucket_ptr which is properly
+        //   aligned,
+        // - the memory regions don't overlap, as the input slice is passed as an
+        //   external const reference parameter,
+        // - T is Copy.
+        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
+        self.len.store(index + slice.len(), Ordering::Release);
+
+        index..index + slice.len()
+    }
 }
 
 impl<T> Drop for AppendVec<T> {
@@ -529,8 +741,9 @@ impl<T> Index<usize> for AppendVec<T> {
     /// # Panics
     ///
     /// The passed `index` must be lower than the size of the collection, i.e. a
-    /// call to [`push()`](Self::push) that returned `index` must have
-    /// happened before this function call. Otherwise, this function panics.
+    /// call to [`push()`](Self::push) (or its variants) that returned `index`
+    /// must have happened before this function call. Otherwise, this
+    /// function panics.
     fn index(&self, index: usize) -> &Self::Output {
         assert!(index < self.len.load(Ordering::Acquire));
         let (bucket, bucket_index) = bucketize(index);
@@ -543,7 +756,7 @@ impl<T> Index<usize> for AppendVec<T> {
         //   the length, ensures that an item was added at the given index before the
         //   rest of this function is executed,
         // - bucket_index * size_of::<T>() fits in an isize, as the checks within push()
-        //   and push_mut() ensure that at most Self::MAX_LEN + 1 items are stored in
+        //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
         //   this collection,
         // - the entire range between bucket_ptr and ptr is derived from one allocation
         //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
@@ -556,6 +769,64 @@ impl<T> Index<usize> for AppendVec<T> {
         //   before this read as ensured by the assertion with an Acquire load on the
         //   length at the beginning of this function.
         unsafe { &*ptr }
+    }
+}
+
+impl<T> Index<Range<usize>> for AppendVec<T> {
+    type Output = [T];
+
+    /// # Panics
+    ///
+    /// The passed `index` range:
+    /// - must be correctly ordered, i.e. `index.start <= index.end`,
+    /// - must be lower than the size of the collection, i.e. a call to
+    ///   [`push_slice()`](Self::push_slice) (or its variants) that returned a
+    ///   superset of `index` must have happened before this function call,
+    /// - must be contained in a single contiguous bucket; this is always the
+    ///   case when passing a subset of a range returned by a previous call to
+    ///   [`push_slice()`](Self::push_slice).
+    ///
+    /// Otherwise, this function panics.
+    fn index(&self, index: Range<usize>) -> &Self::Output {
+        if index.start == index.end {
+            return &[];
+        }
+
+        assert!(index.start <= index.end);
+        let index_len = index.end - index.start;
+
+        assert!(index.end <= self.len.load(Ordering::Acquire));
+        let (bucket, bucket_index) = bucketize(index.start);
+        assert!(index_len <= bucket_len(bucket) - bucket_index);
+
+        let bucket_ptr = self.buckets[bucket].load(Ordering::Relaxed) as *const T;
+        debug_assert_ne!(bucket_ptr, std::ptr::null());
+
+        // SAFETY:
+        // - the assertion comparing `index.end` with `self.len`, with the Acquire load
+        //   on the length, ensures that items were added until the given index before
+        //   the rest of this function is executed,
+        // - bucket_index * size_of::<T>() fits in an isize, as the checks within push()
+        //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
+        //   this collection,
+        // - the entire range between bucket_ptr and ptr is derived from one allocation
+        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        let ptr = unsafe { bucket_ptr.add(bucket_index) };
+        // SAFETY:
+        // - ptr is non-null, as this collection has an invariant that all buckets until
+        //   the length are non null, futher confirmed by a debug assertion,
+        //   - note that the index range isn't empty in this code branch,
+        // - ptr is aligned as it derives from the aligned bucket_ptr,
+        // - ptr is valid for reads of index_len items of type T, as confirmed by the
+        //   assertion that bucket_index + index_len <= bucket_len(bucket),
+        // - ptr points to index_len initialized values of type T, as the collection
+        //   maintains the invariant that all items until `self.len` are initialized,
+        // - the memory isn't mutated for the whole output lifetime, which is bound by
+        //   the lifetime of this collection,
+        // - index_len * size_of::<T>() fits in an isize, as the checks within push()
+        //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
+        //   this collection,
+        unsafe { std::slice::from_raw_parts(ptr, index_len) }
     }
 }
 
@@ -733,13 +1004,77 @@ mod test {
     }
 
     #[test]
-    fn test_index_concurrent_reads() {
-        const NUM_READERS: usize = 4;
-        #[cfg(not(miri))]
-        const NUM_ITEMS: usize = 1_000_000;
-        #[cfg(miri)]
-        const NUM_ITEMS: usize = 100;
+    fn test_push_mut_index() {
+        let mut v = AppendVec::new();
+        for i in 0..100 {
+            assert_eq!(v.push_mut(i), i);
+        }
+        for i in 0..100 {
+            assert_eq!(v[i], i);
+        }
+    }
 
+    #[test]
+    fn test_push_slice_index() {
+        let v = AppendVec::new();
+        for len in 0..10 {
+            let mut prev = 0..0;
+            for i in 0..100 {
+                let data = vec![i; len];
+                let index = v.push_slice(&data);
+                assert!(index.start >= prev.end);
+                assert_eq!(index.end - index.start, len);
+                prev = index.clone();
+                assert_eq!(&v[index], &data);
+            }
+        }
+    }
+
+    #[test]
+    fn test_push_slice_mut_index() {
+        let mut v = AppendVec::new();
+        for len in 0..10 {
+            let mut prev = 0..0;
+            for i in 0..100 {
+                let data = vec![i; len];
+                let index = v.push_slice_mut(&data);
+                assert!(index.start >= prev.end);
+                assert_eq!(index.end - index.start, len);
+                prev = index.clone();
+                assert_eq!(&v[index], &data);
+            }
+        }
+    }
+
+    #[test]
+    fn test_push_slice_padding() {
+        for len in 1..100 {
+            let v = AppendVec::new();
+            let range = v.push_slice(&vec![42; len]);
+            assert_eq!(range.end - range.start, len);
+
+            let bucket_start = if len <= 2 {
+                0
+            } else {
+                let bucket = (len - 1).ilog2() + 1;
+                1 << bucket
+            };
+            assert_eq!(range.start, bucket_start);
+            for i in 0..range.start {
+                assert_eq!(v[i], 0);
+            }
+        }
+    }
+
+    const NUM_READERS: usize = 4;
+    const NUM_WRITERS: usize = 4;
+    #[cfg(not(miri))]
+    const NUM_ITEMS: usize = 1_000_000;
+    #[cfg(miri)]
+    const NUM_ITEMS: usize = 100;
+
+    #[test]
+    fn test_push_index_concurrent_reads() {
         let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
@@ -765,13 +1100,7 @@ mod test {
     }
 
     #[test]
-    fn test_index_concurrent_writes() {
-        const NUM_WRITERS: usize = 4;
-        #[cfg(not(miri))]
-        const NUM_ITEMS: usize = 1_000_000;
-        #[cfg(miri)]
-        const NUM_ITEMS: usize = 100;
-
+    fn test_push_index_concurrent_writes() {
         let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             s.spawn(|| {
@@ -797,14 +1126,7 @@ mod test {
     }
 
     #[test]
-    fn test_index_concurrent_readwrites() {
-        const NUM_READERS: usize = 4;
-        const NUM_WRITERS: usize = 4;
-        #[cfg(not(miri))]
-        const NUM_ITEMS: usize = 1_000_000;
-        #[cfg(miri)]
-        const NUM_ITEMS: usize = 100;
-
+    fn test_push_index_concurrent_readwrites() {
         let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
@@ -832,13 +1154,105 @@ mod test {
     }
 
     #[test]
-    fn test_get_unchecked_concurrent_reads() {
-        const NUM_READERS: usize = 4;
-        #[cfg(not(miri))]
-        const NUM_ITEMS: usize = 1_000_000;
-        #[cfg(miri)]
-        const NUM_ITEMS: usize = 100;
+    fn test_push_slice_index_concurrent_reads() {
+        const SLICE_LEN: usize = 7;
 
+        let v: AppendVec<usize> = AppendVec::new();
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let len = v.len();
+                        if len > 0 {
+                            let last = len - SLICE_LEN;
+                            let slice = &v[last..len];
+                            assert!(slice[0] * SLICE_LEN <= last);
+                            for i in 1..SLICE_LEN {
+                                assert_eq!(slice[i], slice[0]);
+                            }
+                            if len >= SLICE_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            s.spawn(|| {
+                for j in 0..NUM_ITEMS {
+                    assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn test_push_slice_index_concurrent_writes() {
+        const SLICE_LEN: usize = 7;
+
+        let v: AppendVec<usize> = AppendVec::new();
+        thread::scope(|s| {
+            s.spawn(|| {
+                loop {
+                    let len = v.len();
+                    if len > 0 {
+                        let last = len - SLICE_LEN;
+                        let slice = &v[last..len];
+                        assert!(slice[0] * SLICE_LEN <= last);
+                        for i in 1..SLICE_LEN {
+                            assert_eq!(slice[i], slice[0]);
+                        }
+                        if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                            break;
+                        }
+                    }
+                }
+            });
+            for _ in 0..NUM_WRITERS {
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn test_push_slice_index_concurrent_readwrites() {
+        const SLICE_LEN: usize = 7;
+
+        let v: AppendVec<usize> = AppendVec::new();
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let len = v.len();
+                        if len > 0 {
+                            let last = len - SLICE_LEN;
+                            let slice = &v[last..len];
+                            assert!(slice[0] * SLICE_LEN <= last);
+                            for i in 1..SLICE_LEN {
+                                assert_eq!(slice[i], slice[0]);
+                            }
+                            if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn test_get_unchecked_concurrent_reads() {
         let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
@@ -866,12 +1280,6 @@ mod test {
 
     #[test]
     fn test_get_unchecked_concurrent_writes() {
-        const NUM_WRITERS: usize = 4;
-        #[cfg(not(miri))]
-        const NUM_ITEMS: usize = 1_000_000;
-        #[cfg(miri)]
-        const NUM_ITEMS: usize = 100;
-
         let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             s.spawn(|| {
@@ -899,13 +1307,6 @@ mod test {
 
     #[test]
     fn test_get_unchecked_concurrent_readwrites() {
-        const NUM_READERS: usize = 4;
-        const NUM_WRITERS: usize = 4;
-        #[cfg(not(miri))]
-        const NUM_ITEMS: usize = 1_000_000;
-        #[cfg(miri)]
-        const NUM_ITEMS: usize = 100;
-
         let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
