@@ -9,11 +9,14 @@
 )]
 #![cfg_attr(not(test), forbid(clippy::undocumented_unsafe_blocks))]
 
+mod str;
+
 use crossbeam_utils::CachePadded;
 use std::mem::MaybeUninit;
 use std::ops::{Index, Range};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
+pub use str::AppendStr;
 
 /// A concurrent append-only [`Vec`]-like container.
 ///
@@ -825,7 +828,7 @@ impl<T> Index<Range<usize>> for AppendVec<T> {
         //   the lifetime of this collection,
         // - index_len * size_of::<T>() fits in an isize, as the checks within push()
         //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
-        //   this collection,
+        //   this collection.
         unsafe { std::slice::from_raw_parts(ptr, index_len) }
     }
 }
