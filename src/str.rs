@@ -216,14 +216,14 @@ impl Index<Range<usize>> for AppendStr {
 
         let len = self.inner.len.load(Ordering::Acquire);
         assert!(index.end <= len);
-        let (bucket, bucket_index) = bucketize(index.start);
-        let bucket_len = bucket_len(bucket);
+        let (bucket, bucket_index) = bucketize(index.start, self.inner.bucket_offset);
+        let bucket_len = bucket_len(bucket, self.inner.bucket_offset);
         assert!(index_len <= bucket_len - bucket_index);
 
         let bucket_ptr = self.inner.buckets[bucket].load(Ordering::Relaxed) as *const u8;
         debug_assert_ne!(bucket_ptr, std::ptr::null());
 
-        let (last_bucket, last_bucket_len) = bucketize(len);
+        let (last_bucket, last_bucket_len) = bucketize(len, self.inner.bucket_offset);
         let bucket_available_len = if bucket == last_bucket {
             last_bucket_len
         } else {
@@ -403,5 +403,68 @@ mod test {
                 });
             }
         });
+    }
+
+    #[test]
+    fn test_with_some_capacity() {
+        const STR: &str = "⠝💖";
+        const STR_LEN: usize = STR.len();
+
+        let s = AppendStr::with_capacity(STR_LEN);
+        thread::scope(|scope| {
+            for _ in 0..NUM_READERS {
+                scope.spawn(|| {
+                    loop {
+                        let len = s.len();
+                        if len > 0 {
+                            let last = len - STR_LEN;
+                            assert_eq!(&s[last..len], STR);
+                            if len >= NUM_WRITERS * STR_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                scope.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert!(s.push_str(STR).start >= STR_LEN * j);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn test_with_enough_capacity() {
+        const STR: &str = "⠝💖";
+        const STR_LEN: usize = STR.len();
+
+        let s = AppendStr::with_capacity(NUM_WRITERS * STR_LEN * NUM_ITEMS);
+        thread::scope(|scope| {
+            for _ in 0..NUM_READERS {
+                scope.spawn(|| {
+                    loop {
+                        let len = s.len();
+                        if len > 0 {
+                            let last = len - STR_LEN;
+                            assert_eq!(&s[last..len], STR);
+                            if len == NUM_WRITERS * STR_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                scope.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert!(s.push_str(STR).start >= STR_LEN * j);
+                    }
+                });
+            }
+        });
+        assert_eq!(s.len(), NUM_WRITERS * STR_LEN * NUM_ITEMS);
     }
 }

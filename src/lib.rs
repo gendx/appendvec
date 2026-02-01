@@ -54,6 +54,8 @@ pub use str::AppendStr;
 pub struct AppendVec<T> {
     /// Length of the collection.
     len: CachePadded<AtomicUsize>,
+    /// Base-2 logarithm of the size of the first bucket.
+    bucket_offset: u32,
     /// Pointers to allocated buckets of growing size, or null for
     /// not-yet-allocated buckets. [`bucket_len()`] gives the constant size of
     /// each bucket.
@@ -91,6 +93,7 @@ impl<T> AppendVec<T> {
     pub fn new() -> Self {
         Self {
             len: CachePadded::new(AtomicUsize::new(0)),
+            bucket_offset: 1,
             buckets: [const { AtomicPtr::new(std::ptr::null_mut()) }; usize::BITS as usize],
             write_lock: Mutex::new(()),
         }
@@ -98,6 +101,9 @@ impl<T> AppendVec<T> {
 
     /// Creates a new, empty collection, pre-allocating space for at least
     /// `capacity` items.
+    ///
+    /// The requested `capacity` items are guaranteed to be allocated
+    /// contiguously in a single bucket.
     ///
     /// # Panics
     ///
@@ -122,18 +128,23 @@ impl<T> AppendVec<T> {
         );
 
         let mut buckets = [std::ptr::null_mut(); usize::BITS as usize];
-        if capacity != 0 {
-            let (max_bucket, _) = bucketize(capacity - 1);
-            for bucket in 0..=max_bucket {
-                let bucket_len = bucket_len(bucket);
-                let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
-                let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
-                buckets[bucket] = bucket_ptr;
-            }
-        }
+        let bucket_offset = if capacity == 0 {
+            1
+        } else {
+            let bucket_offset = capacity.next_power_of_two().ilog2();
+            debug_assert_eq!(bucketize(capacity - 1, bucket_offset).0, 0);
+
+            let bucket_len = 1 << bucket_offset;
+            let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
+            let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
+            buckets[0] = bucket_ptr;
+
+            bucket_offset
+        };
 
         Self {
             len: CachePadded::new(AtomicUsize::new(0)),
+            bucket_offset,
             buckets: buckets.map(AtomicPtr::new),
             write_lock: Mutex::new(()),
         }
@@ -276,7 +287,7 @@ impl<T> AppendVec<T> {
             panic!("AppendVec is full: cannot push");
         }
 
-        let (bucket, bucket_index) = bucketize(index);
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
 
         // SAFETY:
@@ -327,7 +338,7 @@ impl<T> AppendVec<T> {
         let index = self.len.load(Ordering::Relaxed);
         assert_ne!(index, Self::MAX_LEN, "AppendVec is full: cannot push");
 
-        let (bucket, bucket_index) = bucketize(index);
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         let bucket_ptr = self.get_bucket_ptr_mut(bucket);
 
         // SAFETY:
@@ -393,7 +404,7 @@ impl<T> AppendVec<T> {
     /// });
     /// ```
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        let (bucket, bucket_index) = bucketize(index);
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
 
         let bucket_ptr = self.buckets[bucket].load(Ordering::Relaxed) as *const T;
         debug_assert_ne!(bucket_ptr, std::ptr::null());
@@ -449,6 +460,7 @@ impl<T> AppendVec<T> {
     pub fn iter(&self) -> AppendVecIter<'_, T> {
         AppendVecIter {
             inner: self,
+            bucket_offset: self.bucket_offset,
             len: self.len.load(Ordering::Acquire),
             index: 0,
             bucket_ptr: std::ptr::null(),
@@ -483,7 +495,7 @@ impl<T> AppendVec<T> {
         if !ptr.is_null() {
             ptr
         } else {
-            let bucket_len = bucket_len(bucket);
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
             let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
             let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
             self.buckets[bucket].store(bucket_ptr, Ordering::Relaxed);
@@ -537,8 +549,8 @@ impl<T: Copy + Default> AppendVec<T> {
         }
 
         loop {
-            let (bucket, bucket_index) = bucketize(index);
-            let bucket_len = bucket_len(bucket);
+            let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
             if slice.len() <= bucket_len - bucket_index {
                 break;
             }
@@ -563,11 +575,11 @@ impl<T: Copy + Default> AppendVec<T> {
                 unsafe { std::ptr::write(ptr, T::default()) };
             }
 
-            index = 1 << (bucket + 1);
+            index += bucket_len - bucket_index;
         }
 
-        let (bucket, bucket_index) = bucketize(index);
-        debug_assert!(slice.len() <= bucket_len(bucket) - bucket_index);
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+        debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
         let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
 
         // SAFETY:
@@ -637,8 +649,8 @@ impl<T: Copy + Default> AppendVec<T> {
         );
 
         loop {
-            let (bucket, bucket_index) = bucketize(index);
-            let bucket_len = bucket_len(bucket);
+            let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
             if slice.len() <= bucket_len - bucket_index {
                 break;
             }
@@ -660,11 +672,11 @@ impl<T: Copy + Default> AppendVec<T> {
                 unsafe { std::ptr::write(ptr, T::default()) };
             }
 
-            index = 1 << (bucket + 1);
+            index += bucket_len - bucket_index;
         }
 
-        let (bucket, bucket_index) = bucketize(index);
-        debug_assert!(slice.len() <= bucket_len(bucket) - bucket_index);
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+        debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
         let bucket_ptr = self.get_bucket_ptr_mut(bucket);
 
         // SAFETY:
@@ -697,9 +709,13 @@ impl<T> Drop for AppendVec<T> {
             return;
         }
 
-        let (max_bucket, max_index) = bucketize(len - 1);
+        let (max_bucket, max_index) = bucketize(len - 1, self.bucket_offset);
         for bucket in 0..=max_bucket {
-            let bucket_len = bucket_len(bucket);
+            if bucket != 0 && bucket < self.bucket_offset as usize {
+                continue;
+            }
+
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
             let bucket_items = if bucket != max_bucket {
                 bucket_len
             } else {
@@ -749,7 +765,7 @@ impl<T> Index<usize> for AppendVec<T> {
     /// function panics.
     fn index(&self, index: usize) -> &Self::Output {
         assert!(index < self.len.load(Ordering::Acquire));
-        let (bucket, bucket_index) = bucketize(index);
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
 
         let bucket_ptr = self.buckets[bucket].load(Ordering::Relaxed) as *const T;
         debug_assert_ne!(bucket_ptr, std::ptr::null());
@@ -799,8 +815,8 @@ impl<T> Index<Range<usize>> for AppendVec<T> {
         let index_len = index.end - index.start;
 
         assert!(index.end <= self.len.load(Ordering::Acquire));
-        let (bucket, bucket_index) = bucketize(index.start);
-        assert!(index_len <= bucket_len(bucket) - bucket_index);
+        let (bucket, bucket_index) = bucketize(index.start, self.bucket_offset);
+        assert!(index_len <= bucket_len(bucket, self.bucket_offset) - bucket_index);
 
         let bucket_ptr = self.buckets[bucket].load(Ordering::Relaxed) as *const T;
         debug_assert_ne!(bucket_ptr, std::ptr::null());
@@ -844,6 +860,7 @@ impl<T> Index<Range<usize>> for AppendVec<T> {
 /// or sending this iterator allows retrieving const references to `T`.
 pub struct AppendVecIter<'a, T> {
     inner: &'a AppendVec<T>,
+    bucket_offset: u32,
     len: usize,
     index: usize,
     bucket_ptr: *const T,
@@ -862,7 +879,7 @@ impl<'a, T> Iterator for AppendVecIter<'a, T> {
         if self.index == self.len {
             None
         } else {
-            let (bucket, bucket_index) = bucketize(self.index);
+            let (bucket, bucket_index) = bucketize(self.index, self.bucket_offset);
             self.index += 1;
 
             if bucket_index == 0 {
@@ -905,25 +922,37 @@ impl<T> ExactSizeIterator for AppendVecIter<'_, T> {}
 /// This function guarantees that the returned (`bucket`, `bucket_index`)
 /// satisfy:
 /// - 0 <= `bucket` < [`usize::BITS`].
-/// - if `bucket` == 0: 0 <= `bucket_index` < 2
+/// - if `bucket` != 0, then `bucket` >= `bucket_offset`
+/// - if `bucket` == 0: 0 <= `bucket_index` < 2^bucket_offset
 /// - otherwise: 0 <= `bucket_index` < `1 << bucket`
-const fn bucketize(index: usize) -> (usize, usize) {
-    let bucket = (usize::BITS - 1).saturating_sub(index.leading_zeros());
+const fn bucketize(index: usize, bucket_offset: u32) -> (usize, usize) {
+    let mut bucket = (usize::BITS - 1).saturating_sub(index.leading_zeros());
+    if bucket < bucket_offset {
+        bucket = 0;
+    }
+
     let bucket_index = if bucket == 0 {
         index
     } else {
         index - (1 << bucket)
     };
+
     (bucket as usize, bucket_index)
 }
 
 /// Returns the number of items held in the given `bucket`.
 ///
-/// This is `2^bucket`, except for the first bucket which is of size 2 instead
-/// of 1. This formula ensures that the sum of the sizes of all buckets before
-/// bucket `n` is `2^n` (for `n > 0`).
-const fn bucket_len(bucket: usize) -> usize {
-    if bucket == 0 { 2 } else { 1 << bucket }
+/// This is `2^bucket`, except for the first bucket which is of size
+/// `2^bucket_offset` instead of 1. This formula ensures that the sum of the
+/// sizes of all buckets before bucket `n` is `2^n` (for `n >= bucket_offset`).
+const fn bucket_len(bucket: usize, bucket_offset: u32) -> usize {
+    if bucket == 0 {
+        1 << bucket_offset
+    } else if bucket < bucket_offset as usize {
+        panic!("Invalid bucket between 0 and bucket_offset");
+    } else {
+        1 << bucket
+    }
 }
 
 #[cfg(test)]
@@ -966,27 +995,68 @@ mod test {
 
     #[test]
     fn test_bucketize() {
-        assert_eq!(bucketize(0), (0, 0));
-        assert_eq!(bucketize(1), (0, 1));
-        assert_eq!(bucketize(2), (1, 0));
-        assert_eq!(bucketize(3), (1, 1));
-        assert_eq!(bucketize(4), (2, 0));
-        assert_eq!(bucketize(5), (2, 1));
-        assert_eq!(bucketize(6), (2, 2));
-        assert_eq!(bucketize(7), (2, 3));
-        assert_eq!(bucketize(8), (3, 0));
-        assert_eq!(bucketize(9), (3, 1));
-        assert_eq!(bucketize(10), (3, 2));
+        assert_eq!(bucketize(0, 1), (0, 0));
+        assert_eq!(bucketize(1, 1), (0, 1));
+        assert_eq!(bucketize(2, 1), (1, 0));
+        assert_eq!(bucketize(3, 1), (1, 1));
+        assert_eq!(bucketize(4, 1), (2, 0));
+        assert_eq!(bucketize(5, 1), (2, 1));
+        assert_eq!(bucketize(6, 1), (2, 2));
+        assert_eq!(bucketize(7, 1), (2, 3));
+        assert_eq!(bucketize(8, 1), (3, 0));
+        assert_eq!(bucketize(9, 1), (3, 1));
+        assert_eq!(bucketize(10, 1), (3, 2));
+
+        assert_eq!(bucketize(0, 2), (0, 0));
+        assert_eq!(bucketize(1, 2), (0, 1));
+        assert_eq!(bucketize(2, 2), (0, 2));
+        assert_eq!(bucketize(3, 2), (0, 3));
+        assert_eq!(bucketize(4, 2), (2, 0));
+        assert_eq!(bucketize(5, 2), (2, 1));
+        assert_eq!(bucketize(6, 2), (2, 2));
+        assert_eq!(bucketize(7, 2), (2, 3));
+        assert_eq!(bucketize(8, 2), (3, 0));
+        assert_eq!(bucketize(9, 2), (3, 1));
+        assert_eq!(bucketize(10, 2), (3, 2));
+
+        assert_eq!(bucketize(0, 3), (0, 0));
+        assert_eq!(bucketize(1, 3), (0, 1));
+        assert_eq!(bucketize(2, 3), (0, 2));
+        assert_eq!(bucketize(3, 3), (0, 3));
+        assert_eq!(bucketize(4, 3), (0, 4));
+        assert_eq!(bucketize(5, 3), (0, 5));
+        assert_eq!(bucketize(6, 3), (0, 6));
+        assert_eq!(bucketize(7, 3), (0, 7));
+        assert_eq!(bucketize(8, 3), (3, 0));
+        assert_eq!(bucketize(9, 3), (3, 1));
+        assert_eq!(bucketize(10, 3), (3, 2));
     }
 
     #[test]
     fn test_bucket_len() {
-        assert_eq!(bucket_len(0), 2);
-        assert_eq!(bucket_len(1), 2);
-        assert_eq!(bucket_len(2), 4);
-        assert_eq!(bucket_len(3), 8);
-        assert_eq!(bucket_len(4), 16);
-        assert_eq!(bucket_len(5), 32);
+        assert_eq!(bucket_len(0, 1), 2);
+        assert_eq!(bucket_len(1, 1), 2);
+        assert_eq!(bucket_len(2, 1), 4);
+        assert_eq!(bucket_len(3, 1), 8);
+        assert_eq!(bucket_len(4, 1), 16);
+        assert_eq!(bucket_len(5, 1), 32);
+
+        assert_eq!(bucket_len(0, 2), 4);
+        assert_eq!(bucket_len(2, 2), 4);
+        assert_eq!(bucket_len(3, 2), 8);
+        assert_eq!(bucket_len(4, 2), 16);
+        assert_eq!(bucket_len(5, 2), 32);
+
+        assert_eq!(bucket_len(0, 3), 8);
+        assert_eq!(bucket_len(3, 3), 8);
+        assert_eq!(bucket_len(4, 3), 16);
+        assert_eq!(bucket_len(5, 3), 32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid bucket between 0 and bucket_offset")]
+    fn test_invalid_bucket_len() {
+        let _ = bucket_len(1, 2);
     }
 
     #[test]
@@ -1157,6 +1227,58 @@ mod test {
     }
 
     #[test]
+    fn test_iter() {
+        let v: AppendVec<Box<usize>> = AppendVec::new();
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let iter = v.iter();
+                        let len = iter.len();
+                        for (i, x) in iter.enumerate() {
+                            assert_eq!(i, **x);
+                        }
+                        if len == NUM_ITEMS {
+                            break;
+                        }
+                    }
+                });
+            }
+            s.spawn(|| {
+                for j in 0..NUM_ITEMS {
+                    assert_eq!(v.push(Box::new(j)), j);
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn test_iter_with_some_capacity() {
+        let v: AppendVec<Box<usize>> = AppendVec::with_capacity(NUM_ITEMS / 3);
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let iter = v.iter();
+                        let len = iter.len();
+                        for (i, x) in iter.enumerate() {
+                            assert_eq!(i, **x);
+                        }
+                        if len == NUM_ITEMS {
+                            break;
+                        }
+                    }
+                });
+            }
+            s.spawn(|| {
+                for j in 0..NUM_ITEMS {
+                    assert_eq!(v.push(Box::new(j)), j);
+                }
+            });
+        });
+    }
+
+    #[test]
     fn test_push_slice_index_concurrent_reads() {
         const SLICE_LEN: usize = 7;
 
@@ -1252,6 +1374,75 @@ mod test {
                 });
             }
         });
+    }
+
+    #[test]
+    fn test_with_some_capacity() {
+        const SLICE_LEN: usize = 7;
+
+        let v: AppendVec<usize> = AppendVec::with_capacity(SLICE_LEN);
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let len = v.len();
+                        if len > 0 {
+                            let last = len - SLICE_LEN;
+                            let slice = &v[last..len];
+                            assert!(slice[0] * SLICE_LEN <= last);
+                            for i in 1..SLICE_LEN {
+                                assert_eq!(slice[i], slice[0]);
+                            }
+                            if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn test_with_enough_capacity() {
+        const SLICE_LEN: usize = 7;
+
+        let v: AppendVec<usize> = AppendVec::with_capacity(NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let len = v.len();
+                        if len > 0 {
+                            let last = len - SLICE_LEN;
+                            let slice = &v[last..len];
+                            assert!(slice[0] * SLICE_LEN <= last);
+                            for i in 1..SLICE_LEN {
+                                assert_eq!(slice[i], slice[0]);
+                            }
+                            if len == NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                    }
+                });
+            }
+        });
+        assert_eq!(v.len(), NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
     }
 
     #[test]
