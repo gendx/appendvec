@@ -427,9 +427,9 @@ impl<T> AppendVec<T> {
 
     /// Obtain an iterator over this collection.
     ///
-    /// Note that once this iterator has been created, it will
-    /// not iterate over items added afterwards, even on the same thread. This
-    /// is to minimize the number of atomic operations.
+    /// Note that once this iterator has been created, it will not iterate over
+    /// items added afterwards, even on the same thread. This is to minimize the
+    /// number of atomic operations.
     ///
     /// ```
     /// use appendvec::AppendVec;
@@ -464,6 +464,56 @@ impl<T> AppendVec<T> {
             len: self.len.load(Ordering::Acquire),
             index: 0,
             bucket_ptr: std::ptr::null(),
+        }
+    }
+
+    /// Obtain an iterator over contiguous chunks of items of this collection.
+    ///
+    /// Note that once this iterator has been created, it will not iterate over
+    /// items added afterwards, even on the same thread. This is to minimize the
+    /// number of atomic operations.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    /// use std::thread;
+    ///
+    /// let container = AppendVec::new();
+    /// thread::scope(|s| {
+    ///     s.spawn(|| {
+    ///         for i in 0..42 {
+    ///             let index = container.push(i);
+    ///             assert_eq!(index, i);
+    ///         }
+    ///     });
+    ///     s.spawn(|| {
+    ///         loop {
+    ///             let mut i = 0;
+    ///             for chunk in container.iter_chunks() {
+    ///                 for value in chunk {
+    ///                     assert_eq!(*value, i);
+    ///                     i += 1;
+    ///                 }
+    ///             }
+    ///             if i == 42 {
+    ///                 break;
+    ///             }
+    ///         }
+    ///     });
+    /// });
+    /// ```
+    pub fn iter_chunks(&self) -> AppendVecChunksIter<'_, T> {
+        let len = self.len.load(Ordering::Acquire);
+        let (bucket, (max_bucket, max_index)) = if len == 0 {
+            (self.bucket_offset as usize, (0, 0))
+        } else {
+            (0, bucketize(len - 1, self.bucket_offset))
+        };
+        AppendVecChunksIter {
+            inner: self,
+            bucket_offset: self.bucket_offset,
+            bucket,
+            max_bucket,
+            max_index,
         }
     }
 
@@ -916,6 +966,98 @@ impl<'a, T> Iterator for AppendVecIter<'a, T> {
 
 impl<T> ExactSizeIterator for AppendVecIter<'_, T> {}
 
+/// Iterator over contiguous slices contained in an [`AppendVec`].
+///
+/// Note that once this iterator has been created via the
+/// [`AppendVec::iter_chunks()`] function, it will not iterate over items added
+/// afterwards, even on the same thread. This is to minimize the number of
+/// atomic operations.
+///
+/// Also note that if you inserted slices via
+/// [`push_slice()`](AppendVec::push_slice) or
+/// [`push_slice_mut()`](AppendVec::push_slice_mut), this will also iterate over
+/// the potential padding items, as [`AppendVec`] doesn't keep track of these.
+///
+/// This is is [`Send`] and [`Sync`] if and only if `T` is [`Sync`], as sharing
+/// or sending this iterator allows retrieving const references to `T`.
+pub struct AppendVecChunksIter<'a, T> {
+    inner: &'a AppendVec<T>,
+    bucket_offset: u32,
+    bucket: usize,
+    max_bucket: usize,
+    max_index: usize,
+}
+
+// SAFETY: Sending an AppendVecChunksIter allows retrieving a &[T] on another
+// thread.
+unsafe impl<T: Sync> Send for AppendVecChunksIter<'_, T> {}
+// SAFETY: One cannot do much by sharing an AppendVecChunksIter, but at most it
+// would allow retrieving a &[T] on another thread.
+unsafe impl<T: Sync> Sync for AppendVecChunksIter<'_, T> {}
+
+impl<'a, T> Iterator for AppendVecChunksIter<'a, T> {
+    type Item = &'a [T];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bucket > self.max_bucket {
+            None
+        } else {
+            let bucket_len = bucket_len(self.bucket, self.bucket_offset);
+            let bucket_items = if self.bucket != self.max_bucket {
+                bucket_len
+            } else {
+                self.max_index + 1
+            };
+
+            let bucket_ptr = self.inner.buckets[self.bucket].load(Ordering::Relaxed) as *const T;
+            debug_assert_ne!(bucket_ptr, std::ptr::null());
+
+            self.bucket = if self.bucket == 0 {
+                self.bucket_offset as usize
+            } else {
+                self.bucket + 1
+            };
+
+            // SAFETY: TODO
+            // - bucket_ptr is non-null, as this collection has an invariant that all
+            //   buckets until the length are non null, futher confirmed by a debug
+            //   assertion,
+            // - bucket_ptr is aligned as it derives from an allocation of type [T],
+            // - bucket_ptr is valid for reads of bucket_items items of type T,
+            // - bucket_ptr points to bucket_items initialized values of type T, as the
+            //   AppendVec maintains the invariant that all items until its length are
+            //   initialized,
+            // - the memory isn't mutated for the whole output lifetime, which is bound by
+            //   the lifetime of the underlying AppendVec,
+            // - bucket_items * size_of::<T>() fits in an isize, as the checks within push()
+            //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
+            //   an AppendVec.
+            unsafe { Some(std::slice::from_raw_parts(bucket_ptr, bucket_items)) }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        debug_assert!(self.bucket == 0 || self.bucket >= self.bucket_offset as usize);
+        let adjusted_bucket = if self.bucket == 0 {
+            0
+        } else {
+            self.bucket + 1 - self.bucket_offset as usize
+        };
+
+        debug_assert!(self.max_bucket == 0 || self.max_bucket >= self.bucket_offset as usize);
+        let adjusted_max_bucket = if self.max_bucket == 0 {
+            0
+        } else {
+            self.max_bucket + 1 - self.bucket_offset as usize
+        };
+
+        let remaining = adjusted_max_bucket + 1 - adjusted_bucket;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for AppendVecChunksIter<'_, T> {}
+
 /// Decomposes the given `index` into the bucket that contains it and the index
 /// within that bucket.
 ///
@@ -1233,12 +1375,20 @@ mod test {
             for _ in 0..NUM_READERS {
                 s.spawn(|| {
                     loop {
-                        let iter = v.iter();
-                        let len = iter.len();
-                        for (i, x) in iter.enumerate() {
+                        let mut iter = v.iter();
+
+                        let mut remaining_len = iter.len();
+                        assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
+
+                        let mut i = 0;
+                        while let Some(x) = iter.next() {
                             assert_eq!(i, **x);
+                            i += 1;
+                            remaining_len -= 1;
+                            assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
                         }
-                        if len == NUM_ITEMS {
+
+                        if i == NUM_ITEMS {
                             break;
                         }
                     }
@@ -1259,12 +1409,100 @@ mod test {
             for _ in 0..NUM_READERS {
                 s.spawn(|| {
                     loop {
-                        let iter = v.iter();
-                        let len = iter.len();
-                        for (i, x) in iter.enumerate() {
+                        let mut iter = v.iter();
+
+                        let mut remaining_len = iter.len();
+                        assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
+
+                        let mut i = 0;
+                        while let Some(x) = iter.next() {
                             assert_eq!(i, **x);
+                            i += 1;
+                            remaining_len -= 1;
+                            assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
                         }
-                        if len == NUM_ITEMS {
+
+                        if i == NUM_ITEMS {
+                            break;
+                        }
+                    }
+                });
+            }
+            s.spawn(|| {
+                for j in 0..NUM_ITEMS {
+                    assert_eq!(v.push(Box::new(j)), j);
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn test_iter_chunks() {
+        let v: AppendVec<Box<usize>> = AppendVec::new();
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let mut iter = v.iter_chunks();
+
+                        let mut remaining_chunks = iter.len();
+                        assert_eq!(iter.size_hint(), (remaining_chunks, Some(remaining_chunks)));
+
+                        let mut i = 0;
+                        while let Some(chunk) = iter.next() {
+                            for x in chunk {
+                                assert_eq!(i, **x);
+                                i += 1;
+                            }
+
+                            remaining_chunks -= 1;
+                            assert_eq!(
+                                iter.size_hint(),
+                                (remaining_chunks, Some(remaining_chunks))
+                            );
+                        }
+
+                        if i == NUM_ITEMS {
+                            break;
+                        }
+                    }
+                });
+            }
+            s.spawn(|| {
+                for j in 0..NUM_ITEMS {
+                    assert_eq!(v.push(Box::new(j)), j);
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn test_iter_chunks_with_some_capacity() {
+        let v: AppendVec<Box<usize>> = AppendVec::with_capacity(NUM_ITEMS / 3);
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let mut iter = v.iter_chunks();
+
+                        let mut remaining_chunks = iter.len();
+                        assert_eq!(iter.size_hint(), (remaining_chunks, Some(remaining_chunks)));
+
+                        let mut i = 0;
+                        while let Some(chunk) = iter.next() {
+                            for x in chunk {
+                                assert_eq!(i, **x);
+                                i += 1;
+                            }
+
+                            remaining_chunks -= 1;
+                            assert_eq!(
+                                iter.size_hint(),
+                                (remaining_chunks, Some(remaining_chunks))
+                            );
+                        }
+
+                        if i == NUM_ITEMS {
                             break;
                         }
                     }
