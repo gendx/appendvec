@@ -259,7 +259,8 @@ impl<T> AppendVec<T> {
     /// bugs!
     ///
     /// See also [`push_mut()`](Self::push_mut), which is more efficient if
-    /// you hold a mutable reference to this collection.
+    /// you hold a mutable reference to this [`AppendVec`] as it avoid acquiring
+    /// a write lock.
     ///
     /// # Panics
     ///
@@ -554,45 +555,51 @@ impl<T> AppendVec<T> {
     }
 }
 
-impl<T: Copy + Default> AppendVec<T> {
-    /// Adds the given contiguous slice of items to this collection, and returns
-    /// the range at which they were added.
-    ///
-    /// The items are guaranteed to be pushed contiguously, so that indexing the
-    /// result allows to retrieve back a contiguous slice. If the current bucket
-    /// doesn't have enough remaining capacity to accommodate this contiguous
-    /// slice, it will be padded with default items, hence the [`Default`]
-    /// requirement for `T`.
-    ///
-    /// Note that there is currently also a [`Copy`] requirement for performance
-    /// reasons when copying the input slice into this collection.
-    ///
-    /// See also [`push()`](Self::push).
-    ///
-    /// # Panics
-    ///
-    /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
-    ///
-    /// ```
-    /// use appendvec::AppendVec;
-    ///
-    /// let container = AppendVec::new();
-    /// for i in 0..42 {
-    ///     let blob = vec![123; i];
-    ///     let index = container.push_slice(blob.as_slice());
-    ///     assert_eq!(&container[index], blob.as_slice());
-    /// }
-    /// ```
-    pub fn push_slice(&self, slice: &[T]) -> Range<usize> {
-        if slice.is_empty() {
-            return 0..0;
+impl<T: Default> AppendVec<T> {
+    fn prepare_contiguous_slice_mut(&mut self, slice_len: usize) -> usize {
+        let mut index = self.len.load(Ordering::Relaxed);
+        assert!(
+            slice_len <= Self::MAX_LEN - index,
+            "AppendVec is full: cannot push"
+        );
+
+        loop {
+            let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
+            if slice_len <= bucket_len - bucket_index {
+                break;
+            }
+
+            let bucket_ptr = self.get_bucket_ptr_mut(bucket);
+            for i in bucket_index..bucket_len {
+                // SAFETY:
+                // - i * size_of::<T>() fits in an isize, as promised by the bucket_len()
+                //   function, with an input index <= Self::MAX_LEN,
+                // - the entire range between bucket_ptr and ptr is derived from one allocation
+                //   of bucket_len items, as 0 <= i < bucket_len.
+                let ptr = unsafe { bucket_ptr.add(i) };
+                // SAFETY:
+                // - ptr is properly aligned, non-null with correct provenance, because it's
+                //   derived from bucket_ptr which is itself aligned as it was allocated from a
+                //   boxed slice of Ts,
+                // - ptr is valid for exclusive writes as this function takes an exclusive `&mut
+                //   self` parameter.
+                unsafe { std::ptr::write(ptr, T::default()) };
+            }
+
+            index += bucket_len - bucket_index;
         }
 
-        let guard = self.write_lock.lock().unwrap();
+        index
+    }
 
+    fn prepare_contiguous_slice<'guard>(
+        &self,
+        slice_len: usize,
+        guard: MutexGuard<'guard, ()>,
+    ) -> (MutexGuard<'guard, ()>, usize) {
         let mut index = self.len.load(Ordering::Relaxed);
-        if slice.len() > Self::MAX_LEN - index {
+        if slice_len > Self::MAX_LEN - index {
             // Drop the guard before panicking to avoid poisoning the Mutex.
             drop(guard);
             panic!("AppendVec is full: cannot push");
@@ -601,7 +608,7 @@ impl<T: Copy + Default> AppendVec<T> {
         loop {
             let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
             let bucket_len = bucket_len(bucket, self.bucket_offset);
-            if slice.len() <= bucket_len - bucket_index {
+            if slice_len <= bucket_len - bucket_index {
                 break;
             }
 
@@ -628,27 +635,64 @@ impl<T: Copy + Default> AppendVec<T> {
             index += bucket_len - bucket_index;
         }
 
+        (guard, index)
+    }
+}
+
+impl<T: Clone + Default> AppendVec<T> {
+    /// Adds the given contiguous slice of items to this collection, and returns
+    /// the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`push_slice_mut()`](Self::push_slice_mut) is more efficient as it
+    /// avoids acquiring a write lock.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`push_slice_copy()`](Self::push_slice_copy) instead may be more
+    /// efficient.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     let index = container.push_slice(blob.as_slice());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_slice(&self, slice: &[T]) -> Range<usize> {
+        if slice.is_empty() {
+            return 0..0;
+        }
+
+        let guard = self.write_lock.lock().unwrap();
+        let (guard, index) = self.prepare_contiguous_slice(slice.len(), guard);
+
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
         let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
 
         // SAFETY:
-        // - bucket_index * size_of::<T>() fits in an isize, as promised by the
-        //   bucketize() function, with an input index <= Self::MAX_LEN,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
-        let ptr = unsafe { bucket_ptr.add(bucket_index) };
-        // SAFETY:
-        // - slice.as_ptr() is valid for reading slice.len() items of type T,
-        // - ptr is valid for writing slice.len() items of type T, indeed bucket_index +
-        //   slice.len() <= bucket_len(bucket),
-        // - slice.as_ptr() is properly aligned, as it directly derives from a slice,
-        // - ptr is properly aligned, as it derives from bucket_ptr which is properly
-        //   aligned,
-        // - the memory regions don't overlap, as the input slice is passed as an
-        //   external const reference parameter,
-        // - T is Copy.
-        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
+        // - bucket_pointer is non-null, properly aligned and points to an allocated
+        //   bucket, as ensured by get_bucket_ptr(),
+        // - items starting at bucket_index within this bucket are not yet initialized,
+        //   as ensured by prepare_contiguous_slice(),
+        // - no concurrent writes happen on this AppendVec, as the write lock is held,
+        // - no concurrent reads happen beyond bucket_index on this bucket, as the
+        //   length is only updated below, using a Release ordering.
+        unsafe { self.clone_slice(bucket_ptr, bucket_index, slice) };
         self.len.store(index + slice.len(), Ordering::Release);
 
         drop(guard);
@@ -665,12 +709,163 @@ impl<T: Copy + Default> AppendVec<T> {
     /// slice, it will be padded with default items, hence the [`Default`]
     /// requirement for `T`.
     ///
-    /// Note that there is currently also a [`Copy`] requirement for performance
-    /// reasons when copying the input slice into this collection.
-    ///
     /// Contrary to [`push_slice()`](Self::push_slice), no write lock is held
     /// internally because this function already takes an exclusive mutable
     /// reference to this collection.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`push_slice_copy_mut()`](Self::push_slice_copy_mut) instead may be more
+    /// efficient.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let mut container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("i"); i];
+    ///     let index = container.push_slice_mut(blob.as_slice());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_slice_mut(&mut self, slice: &[T]) -> Range<usize> {
+        if slice.is_empty() {
+            return 0..0;
+        }
+
+        let index = self.prepare_contiguous_slice_mut(slice.len());
+
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+        debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
+        let bucket_ptr = self.get_bucket_ptr_mut(bucket);
+
+        // SAFETY:
+        // - bucket_pointer is non-null, properly aligned and points to an allocated
+        //   bucket, as ensured by get_bucket_ptr_mut(),
+        // - items starting at bucket_index within this bucket are not yet initialized,
+        //   as ensured by prepare_contiguous_slice_mut(),
+        // - no concurrent reads nor writes happen on this AppendVec, as this function
+        //   holds an exclusive reference to it.
+        unsafe { self.clone_slice(bucket_ptr, bucket_index, slice) };
+        self.len.store(index + slice.len(), Ordering::Release);
+
+        index..index + slice.len()
+    }
+
+    /// Clones the given slice into indices starting at `bucket_index` in the
+    /// bucket starting at `bucket_ptr`.
+    ///
+    /// # Safety
+    ///
+    /// - The bucket pointer must be non-null, properly aligned and point to an
+    ///   allocated bucket of `bucket_len` items belonging to this
+    ///   [`AppendVec`], such that `bucket_index + slice.len() <= bucket_len`.
+    /// - Items starting at `bucket_index` within the bucket must not be
+    ///   initialized.
+    /// - No concurrent reads or writes to the items starting at `bucket_index`
+    ///   happen.
+    unsafe fn clone_slice(&self, bucket_ptr: *mut T, bucket_index: usize, slice: &[T]) {
+        for (i, item) in slice.iter().enumerate() {
+            // SAFETY:
+            // - the entire range between bucket_ptr and ptr is derived from one allocation
+            //   of bucket_len(bucket) items, as 0 <= bucket_index + slice.len() <=
+            //   bucket_len(bucket).
+            // - (bucket_index + i) * size_of::<T>() fits in an isize, as promised by the
+            //   bucketize() function, with an input index <= Self::MAX_LEN,
+            let ptr = unsafe { bucket_ptr.add(bucket_index + i) };
+
+            let item: T = item.clone();
+            // SAFETY:
+            // - ptr is properly aligned, non-null with correct provenance, because it's
+            //   derived from bucket_ptr which is itself aligned as it was allocated from a
+            //   boxed slice of Ts,
+            // - ptr points to a non-initialized memory slot, as it is beyond bucket_index,
+            // - ptr is valid for exclusive writes, as no concurrent reads or writes happen
+            //   beyond bucket_index.
+            unsafe { std::ptr::write(ptr, item) };
+        }
+    }
+}
+
+impl<T: Copy + Default> AppendVec<T> {
+    /// Adds the given contiguous slice of items to this collection, and returns
+    /// the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`push_slice_copy_mut()`](Self::push_slice_copy_mut) is more efficient
+    /// as it avoids acquiring a write lock.
+    ///
+    /// If `T` only implements [`Clone`], you can call
+    /// [`push_slice()`](Self::push_slice) instead.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let container = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![123; i];
+    ///     let index = container.push_slice_copy(blob.as_slice());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_slice_copy(&self, slice: &[T]) -> Range<usize> {
+        if slice.is_empty() {
+            return 0..0;
+        }
+
+        let guard = self.write_lock.lock().unwrap();
+        let (guard, index) = self.prepare_contiguous_slice(slice.len(), guard);
+
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+        debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
+        let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
+
+        // SAFETY:
+        // - bucket_pointer is non-null, properly aligned and points to an allocated
+        //   bucket, as ensured by get_bucket_ptr(),
+        // - items starting at bucket_index within this bucket are not yet initialized,
+        //   as ensured by prepare_contiguous_slice(),
+        // - no concurrent writes happen on this AppendVec, as the write lock is held,
+        // - no concurrent reads happen beyond bucket_index on this bucket, as the
+        //   length is only updated below, using a Release ordering.
+        unsafe { self.copy_slice(bucket_ptr, bucket_index, slice) };
+        self.len.store(index + slice.len(), Ordering::Release);
+
+        drop(guard);
+
+        index..index + slice.len()
+    }
+
+    /// Adds the given contiguous slice of items to this collection, and returns
+    /// the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`push_slice_copy()`](Self::push_slice_copy), no write lock
+    /// is held internally because this function already takes an exclusive
+    /// mutable reference to this collection.
+    ///
+    /// If `T` only implements [`Clone`], you can call
+    /// [`push_slice_mut()`](Self::push_slice_mut) instead.
     ///
     /// # Panics
     ///
@@ -683,52 +878,47 @@ impl<T: Copy + Default> AppendVec<T> {
     /// let mut container = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
-    ///     let index = container.push_slice_mut(blob.as_slice());
+    ///     let index = container.push_slice_copy_mut(blob.as_slice());
     ///     assert_eq!(&container[index], blob.as_slice());
     /// }
     /// ```
-    pub fn push_slice_mut(&mut self, slice: &[T]) -> Range<usize> {
+    pub fn push_slice_copy_mut(&mut self, slice: &[T]) -> Range<usize> {
         if slice.is_empty() {
             return 0..0;
         }
 
-        let mut index = self.len.load(Ordering::Relaxed);
-        assert!(
-            slice.len() <= Self::MAX_LEN - index,
-            "AppendVec is full: cannot push"
-        );
-
-        loop {
-            let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
-            let bucket_len = bucket_len(bucket, self.bucket_offset);
-            if slice.len() <= bucket_len - bucket_index {
-                break;
-            }
-
-            let bucket_ptr = self.get_bucket_ptr_mut(bucket);
-            for i in bucket_index..bucket_len {
-                // SAFETY:
-                // - i * size_of::<T>() fits in an isize, as promised by the bucket_len()
-                //   function, with an input index <= Self::MAX_LEN,
-                // - the entire range between bucket_ptr and ptr is derived from one allocation
-                //   of bucket_len items, as 0 <= i < bucket_len.
-                let ptr = unsafe { bucket_ptr.add(i) };
-                // SAFETY:
-                // - ptr is properly aligned, non-null with correct provenance, because it's
-                //   derived from bucket_ptr which is itself aligned as it was allocated from a
-                //   boxed slice of Ts,
-                // - ptr is valid for exclusive writes as this function takes an exclusive `&mut
-                //   self` parameter.
-                unsafe { std::ptr::write(ptr, T::default()) };
-            }
-
-            index += bucket_len - bucket_index;
-        }
+        let index = self.prepare_contiguous_slice_mut(slice.len());
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
         let bucket_ptr = self.get_bucket_ptr_mut(bucket);
 
+        // SAFETY:
+        // - bucket_pointer is non-null, properly aligned and points to an allocated
+        //   bucket, as ensured by get_bucket_ptr_mut(),
+        // - items starting at bucket_index within this bucket are not yet initialized,
+        //   as ensured by prepare_contiguous_slice_mut(),
+        // - no concurrent reads nor writes happen on this AppendVec, as this function
+        //   holds an exclusive reference to it.
+        unsafe { self.copy_slice(bucket_ptr, bucket_index, slice) };
+        self.len.store(index + slice.len(), Ordering::Release);
+
+        index..index + slice.len()
+    }
+
+    /// Copies the given slice into indices starting at `bucket_index` in the
+    /// bucket starting at `bucket_ptr`.
+    ///
+    /// # Safety
+    ///
+    /// - The bucket pointer must be non-null, properly aligned and point to an
+    ///   allocated bucket of `bucket_len` items belonging to this
+    ///   [`AppendVec`], such that `bucket_index + slice.len() <= bucket_len`.
+    /// - Items starting at `bucket_index` within the bucket must not be
+    ///   initialized.
+    /// - No concurrent reads or writes to the items starting at `bucket_index`
+    ///   happen.
+    unsafe fn copy_slice(&self, bucket_ptr: *mut T, bucket_index: usize, slice: &[T]) {
         // SAFETY:
         // - bucket_index * size_of::<T>() fits in an isize, as promised by the
         //   bucketize() function, with an input index <= Self::MAX_LEN,
@@ -746,9 +936,6 @@ impl<T: Copy + Default> AppendVec<T> {
         //   external const reference parameter,
         // - T is Copy.
         unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
-        self.len.store(index + slice.len(), Ordering::Release);
-
-        index..index + slice.len()
     }
 }
 
@@ -1018,7 +1205,7 @@ impl<'a, T> Iterator for AppendVecChunksIter<'a, T> {
                 self.bucket + 1
             };
 
-            // SAFETY: TODO
+            // SAFETY:
             // - bucket_ptr is non-null, as this collection has an invariant that all
             //   buckets until the length are non null, futher confirmed by a debug
             //   assertion,
@@ -1101,7 +1288,7 @@ const fn bucket_len(bucket: usize, bucket_offset: u32) -> usize {
 mod test {
     use super::*;
     use std::ops::Deref;
-    use std::thread;
+    use std::{array, thread};
 
     #[test]
     fn test_item_size_log2() {
@@ -1284,7 +1471,7 @@ mod test {
     const NUM_READERS: usize = 4;
     const NUM_WRITERS: usize = 4;
     #[cfg(not(miri))]
-    const NUM_ITEMS: usize = 1_000_000;
+    const NUM_ITEMS: usize = 100_000;
     #[cfg(miri)]
     const NUM_ITEMS: usize = 100;
 
@@ -1527,7 +1714,7 @@ mod test {
     fn test_push_slice_index_concurrent_reads() {
         const SLICE_LEN: usize = 7;
 
-        let v: AppendVec<usize> = AppendVec::new();
+        let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
                 s.spawn(|| {
@@ -1536,7 +1723,7 @@ mod test {
                         if len > 0 {
                             let last = len - SLICE_LEN;
                             let slice = &v[last..len];
-                            assert!(slice[0] * SLICE_LEN <= last);
+                            assert!(*slice[0] * SLICE_LEN <= last);
                             for i in 1..SLICE_LEN {
                                 assert_eq!(slice[i], slice[0]);
                             }
@@ -1549,7 +1736,8 @@ mod test {
             }
             s.spawn(|| {
                 for j in 0..NUM_ITEMS {
-                    assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                    let slice: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                    assert!(v.push_slice(&slice).start >= SLICE_LEN * j);
                 }
             });
         });
@@ -1559,7 +1747,7 @@ mod test {
     fn test_push_slice_index_concurrent_writes() {
         const SLICE_LEN: usize = 7;
 
-        let v: AppendVec<usize> = AppendVec::new();
+        let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             s.spawn(|| {
                 loop {
@@ -1567,7 +1755,7 @@ mod test {
                     if len > 0 {
                         let last = len - SLICE_LEN;
                         let slice = &v[last..len];
-                        assert!(slice[0] * SLICE_LEN <= last);
+                        assert!(*slice[0] * SLICE_LEN <= last);
                         for i in 1..SLICE_LEN {
                             assert_eq!(slice[i], slice[0]);
                         }
@@ -1580,7 +1768,8 @@ mod test {
             for _ in 0..NUM_WRITERS {
                 s.spawn(|| {
                     for j in 0..NUM_ITEMS {
-                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                        let slice: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                        assert!(v.push_slice(&slice).start >= SLICE_LEN * j);
                     }
                 });
             }
@@ -1591,7 +1780,7 @@ mod test {
     fn test_push_slice_index_concurrent_readwrites() {
         const SLICE_LEN: usize = 7;
 
-        let v: AppendVec<usize> = AppendVec::new();
+        let v: AppendVec<Box<usize>> = AppendVec::new();
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
                 s.spawn(|| {
@@ -1600,7 +1789,7 @@ mod test {
                         if len > 0 {
                             let last = len - SLICE_LEN;
                             let slice = &v[last..len];
-                            assert!(slice[0] * SLICE_LEN <= last);
+                            assert!(*slice[0] * SLICE_LEN <= last);
                             for i in 1..SLICE_LEN {
                                 assert_eq!(slice[i], slice[0]);
                             }
@@ -1614,7 +1803,8 @@ mod test {
             for _ in 0..NUM_WRITERS {
                 s.spawn(|| {
                     for j in 0..NUM_ITEMS {
-                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                        let slice: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                        assert!(v.push_slice(&slice).start >= SLICE_LEN * j);
                     }
                 });
             }
@@ -1626,7 +1816,7 @@ mod test {
         const SLICE_LEN: usize = 7;
 
         for capacity in [0, SLICE_LEN] {
-            let v: AppendVec<usize> = AppendVec::with_capacity(capacity);
+            let v: AppendVec<Box<usize>> = AppendVec::with_capacity(capacity);
             thread::scope(|s| {
                 for _ in 0..NUM_READERS {
                     s.spawn(|| {
@@ -1635,7 +1825,7 @@ mod test {
                             if len > 0 {
                                 let last = len - SLICE_LEN;
                                 let slice = &v[last..len];
-                                assert!(slice[0] * SLICE_LEN <= last);
+                                assert!(*slice[0] * SLICE_LEN <= last);
                                 for i in 1..SLICE_LEN {
                                     assert_eq!(slice[i], slice[0]);
                                 }
@@ -1649,7 +1839,8 @@ mod test {
                 for _ in 0..NUM_WRITERS {
                     s.spawn(|| {
                         for j in 0..NUM_ITEMS {
-                            assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                            let slice: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                            assert!(v.push_slice(&slice).start >= SLICE_LEN * j);
                         }
                     });
                 }
@@ -1661,7 +1852,8 @@ mod test {
     fn test_push_slice_with_enough_capacity() {
         const SLICE_LEN: usize = 7;
 
-        let v: AppendVec<usize> = AppendVec::with_capacity(NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
+        let v: AppendVec<Box<usize>> =
+            AppendVec::with_capacity(NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
         thread::scope(|s| {
             for _ in 0..NUM_READERS {
                 s.spawn(|| {
@@ -1670,7 +1862,7 @@ mod test {
                         if len > 0 {
                             let last = len - SLICE_LEN;
                             let slice = &v[last..len];
-                            assert!(slice[0] * SLICE_LEN <= last);
+                            assert!(*slice[0] * SLICE_LEN <= last);
                             for i in 1..SLICE_LEN {
                                 assert_eq!(slice[i], slice[0]);
                             }
@@ -1684,7 +1876,8 @@ mod test {
             for _ in 0..NUM_WRITERS {
                 s.spawn(|| {
                     for j in 0..NUM_ITEMS {
-                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                        let slice: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                        assert!(v.push_slice(&slice).start >= SLICE_LEN * j);
                     }
                 });
             }

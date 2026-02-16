@@ -123,7 +123,7 @@ impl AppendStr {
     /// }
     /// ```
     pub fn push_str(&self, s: &str) -> Range<usize> {
-        self.inner.push_slice(s.as_bytes())
+        self.inner.push_slice_copy(s.as_bytes())
     }
 
     /// Adds the given string to this collection, and returns the byte range at
@@ -150,7 +150,7 @@ impl AppendStr {
     /// }
     /// ```
     pub fn push_str_mut(&mut self, s: &str) -> Range<usize> {
-        self.inner.push_slice_mut(s.as_bytes())
+        self.inner.push_slice_copy_mut(s.as_bytes())
     }
 
     /// Gets the byte slice at the given index range, without checking that they
