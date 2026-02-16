@@ -1403,37 +1403,39 @@ mod test {
     }
 
     #[test]
-    fn test_iter_with_some_capacity() {
-        let v: AppendVec<Box<usize>> = AppendVec::with_capacity(NUM_ITEMS / 3);
-        thread::scope(|s| {
-            for _ in 0..NUM_READERS {
-                s.spawn(|| {
-                    loop {
-                        let mut iter = v.iter();
+    fn test_iter_with_capacity() {
+        for capacity in [0, NUM_ITEMS / 3] {
+            let v: AppendVec<Box<usize>> = AppendVec::with_capacity(capacity);
+            thread::scope(|s| {
+                for _ in 0..NUM_READERS {
+                    s.spawn(|| {
+                        loop {
+                            let mut iter = v.iter();
 
-                        let mut remaining_len = iter.len();
-                        assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
-
-                        let mut i = 0;
-                        while let Some(x) = iter.next() {
-                            assert_eq!(i, **x);
-                            i += 1;
-                            remaining_len -= 1;
+                            let mut remaining_len = iter.len();
                             assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
-                        }
 
-                        if i == NUM_ITEMS {
-                            break;
+                            let mut i = 0;
+                            while let Some(x) = iter.next() {
+                                assert_eq!(i, **x);
+                                i += 1;
+                                remaining_len -= 1;
+                                assert_eq!(iter.size_hint(), (remaining_len, Some(remaining_len)));
+                            }
+
+                            if i == NUM_ITEMS {
+                                break;
+                            }
                         }
+                    });
+                }
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert_eq!(v.push(Box::new(j)), j);
                     }
                 });
-            }
-            s.spawn(|| {
-                for j in 0..NUM_ITEMS {
-                    assert_eq!(v.push(Box::new(j)), j);
-                }
             });
-        });
+        }
     }
 
     #[test]
@@ -1477,43 +1479,48 @@ mod test {
     }
 
     #[test]
-    fn test_iter_chunks_with_some_capacity() {
-        let v: AppendVec<Box<usize>> = AppendVec::with_capacity(NUM_ITEMS / 3);
-        thread::scope(|s| {
-            for _ in 0..NUM_READERS {
-                s.spawn(|| {
-                    loop {
-                        let mut iter = v.iter_chunks();
+    fn test_iter_chunks_with_capacity() {
+        for capacity in [0, NUM_ITEMS / 3] {
+            let v: AppendVec<Box<usize>> = AppendVec::with_capacity(capacity);
+            thread::scope(|s| {
+                for _ in 0..NUM_READERS {
+                    s.spawn(|| {
+                        loop {
+                            let mut iter = v.iter_chunks();
 
-                        let mut remaining_chunks = iter.len();
-                        assert_eq!(iter.size_hint(), (remaining_chunks, Some(remaining_chunks)));
-
-                        let mut i = 0;
-                        while let Some(chunk) = iter.next() {
-                            for x in chunk {
-                                assert_eq!(i, **x);
-                                i += 1;
-                            }
-
-                            remaining_chunks -= 1;
+                            let mut remaining_chunks = iter.len();
                             assert_eq!(
                                 iter.size_hint(),
                                 (remaining_chunks, Some(remaining_chunks))
                             );
-                        }
 
-                        if i == NUM_ITEMS {
-                            break;
+                            let mut i = 0;
+                            while let Some(chunk) = iter.next() {
+                                for x in chunk {
+                                    assert_eq!(i, **x);
+                                    i += 1;
+                                }
+
+                                remaining_chunks -= 1;
+                                assert_eq!(
+                                    iter.size_hint(),
+                                    (remaining_chunks, Some(remaining_chunks))
+                                );
+                            }
+
+                            if i == NUM_ITEMS {
+                                break;
+                            }
                         }
+                    });
+                }
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        assert_eq!(v.push(Box::new(j)), j);
                     }
                 });
-            }
-            s.spawn(|| {
-                for j in 0..NUM_ITEMS {
-                    assert_eq!(v.push(Box::new(j)), j);
-                }
             });
-        });
+        }
     }
 
     #[test]
@@ -1615,41 +1622,43 @@ mod test {
     }
 
     #[test]
-    fn test_with_some_capacity() {
+    fn test_push_slice_with_little_capacity() {
         const SLICE_LEN: usize = 7;
 
-        let v: AppendVec<usize> = AppendVec::with_capacity(SLICE_LEN);
-        thread::scope(|s| {
-            for _ in 0..NUM_READERS {
-                s.spawn(|| {
-                    loop {
-                        let len = v.len();
-                        if len > 0 {
-                            let last = len - SLICE_LEN;
-                            let slice = &v[last..len];
-                            assert!(slice[0] * SLICE_LEN <= last);
-                            for i in 1..SLICE_LEN {
-                                assert_eq!(slice[i], slice[0]);
-                            }
-                            if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
-                                break;
+        for capacity in [0, SLICE_LEN] {
+            let v: AppendVec<usize> = AppendVec::with_capacity(capacity);
+            thread::scope(|s| {
+                for _ in 0..NUM_READERS {
+                    s.spawn(|| {
+                        loop {
+                            let len = v.len();
+                            if len > 0 {
+                                let last = len - SLICE_LEN;
+                                let slice = &v[last..len];
+                                assert!(slice[0] * SLICE_LEN <= last);
+                                for i in 1..SLICE_LEN {
+                                    assert_eq!(slice[i], slice[0]);
+                                }
+                                if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                    break;
+                                }
                             }
                         }
-                    }
-                });
-            }
-            for _ in 0..NUM_WRITERS {
-                s.spawn(|| {
-                    for j in 0..NUM_ITEMS {
-                        assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
-                    }
-                });
-            }
-        });
+                    });
+                }
+                for _ in 0..NUM_WRITERS {
+                    s.spawn(|| {
+                        for j in 0..NUM_ITEMS {
+                            assert!(v.push_slice(&[j; SLICE_LEN]).start >= SLICE_LEN * j);
+                        }
+                    });
+                }
+            });
+        }
     }
 
     #[test]
-    fn test_with_enough_capacity() {
+    fn test_push_slice_with_enough_capacity() {
         const SLICE_LEN: usize = 7;
 
         let v: AppendVec<usize> = AppendVec::with_capacity(NUM_WRITERS * SLICE_LEN * NUM_ITEMS);

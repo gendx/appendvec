@@ -406,34 +406,36 @@ mod test {
     }
 
     #[test]
-    fn test_with_some_capacity() {
+    fn test_with_little_capacity() {
         const STR: &str = "⠝💖";
         const STR_LEN: usize = STR.len();
 
-        let s = AppendStr::with_capacity(STR_LEN);
-        thread::scope(|scope| {
-            for _ in 0..NUM_READERS {
-                scope.spawn(|| {
-                    loop {
-                        let len = s.len();
-                        if len > 0 {
-                            let last = len - STR_LEN;
-                            assert_eq!(&s[last..len], STR);
-                            if len >= NUM_WRITERS * STR_LEN * NUM_ITEMS {
-                                break;
+        for capacity in [0, STR_LEN] {
+            let s = AppendStr::with_capacity(capacity);
+            thread::scope(|scope| {
+                for _ in 0..NUM_READERS {
+                    scope.spawn(|| {
+                        loop {
+                            let len = s.len();
+                            if len > 0 {
+                                let last = len - STR_LEN;
+                                assert_eq!(&s[last..len], STR);
+                                if len >= NUM_WRITERS * STR_LEN * NUM_ITEMS {
+                                    break;
+                                }
                             }
                         }
-                    }
-                });
-            }
-            for _ in 0..NUM_WRITERS {
-                scope.spawn(|| {
-                    for j in 0..NUM_ITEMS {
-                        assert!(s.push_str(STR).start >= STR_LEN * j);
-                    }
-                });
-            }
-        });
+                    });
+                }
+                for _ in 0..NUM_WRITERS {
+                    scope.spawn(|| {
+                        for j in 0..NUM_ITEMS {
+                            assert!(s.push_str(STR).start >= STR_LEN * j);
+                        }
+                    });
+                }
+            });
+        }
     }
 
     #[test]
