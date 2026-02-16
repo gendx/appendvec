@@ -556,6 +556,268 @@ impl<T> AppendVec<T> {
 }
 
 impl<T: Default> AppendVec<T> {
+    /// Moves the given contiguous slice of items to this collection, and
+    /// returns the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`push_owned_slice_mut()`](Self::push_owned_slice_mut) is more efficient
+    /// as it avoids acquiring a write lock.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`push_slice_copy()`](Self::push_slice_copy) instead on a borrowed slice
+    /// may be more efficient.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     let index = container.push_owned_slice(blob.clone());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_owned_slice(&self, owned_slice: Vec<T>) -> Range<usize> {
+        // SAFETY: The length of an iterator on Vec is trusted.
+        unsafe { self.push_iterator(owned_slice.into_iter()) }
+    }
+
+    /// Moves the given contiguous slice of items to this collection, and
+    /// returns the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`push_owned_slice()`](Self::push_owned_slice), no write
+    /// lock is held internally because this function already takes an
+    /// exclusive mutable reference to this collection.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`push_slice_copy_mut()`](Self::push_slice_copy_mut) instead may be more
+    /// efficient.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let mut container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     let index = container.push_owned_slice_mut(blob.clone());
+    ///     assert_eq!(&container[index], blob.as_slice());
+    /// }
+    /// ```
+    pub fn push_owned_slice_mut(&mut self, owned_slice: Vec<T>) -> Range<usize> {
+        // SAFETY: The length of an iterator on Vec is trusted.
+        unsafe { self.push_iterator_mut(owned_slice.into_iter()) }
+    }
+
+    /// Moves the given array of items to this collection, and returns the range
+    /// at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`push_array_mut()`](Self::push_array_mut) is more efficient as it
+    /// avoids acquiring a write lock.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`push_slice_copy()`](Self::push_slice_copy) instead on a borrowed slice
+    /// may be more efficient.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob: [String; 11] = std::array::from_fn(|_| format!("{i}"));
+    ///     let index = container.push_array(blob.clone());
+    ///     assert_eq!(&container[index], &blob);
+    /// }
+    /// ```
+    pub fn push_array<const N: usize>(&self, array: [T; N]) -> Range<usize> {
+        // SAFETY: The length of an array iterator is trusted.
+        unsafe { self.push_iterator(array.into_iter()) }
+    }
+
+    /// Moves the given array of items to this collection, and returns the range
+    /// at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`push_array()`](Self::push_array), no write lock is held
+    /// internally because this function already takes an exclusive mutable
+    /// reference to this collection.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`push_slice_copy_mut()`](Self::push_slice_copy_mut) instead may be more
+    /// efficient.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`.
+    ///
+    /// ```
+    /// use appendvec::AppendVec;
+    ///
+    /// let mut container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob: [String; 11] = std::array::from_fn(|_| format!("{i}"));
+    ///     let index = container.push_array_mut(blob.clone());
+    ///     assert_eq!(&container[index], &blob);
+    /// }
+    /// ```
+    pub fn push_array_mut<const N: usize>(&mut self, array: [T; N]) -> Range<usize> {
+        // SAFETY: The length of an array iterator is trusted.
+        unsafe { self.push_iterator_mut(array.into_iter()) }
+    }
+
+    /// Adds all the items from the given iterator to this collection, and
+    /// returns the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice.
+    ///
+    /// # Safety
+    ///
+    /// - This function requires the iterator length to be correct.
+    unsafe fn push_iterator(&self, iter: impl ExactSizeIterator<Item = T>) -> Range<usize> {
+        let iter_len = iter.len();
+        if iter_len == 0 {
+            return 0..0;
+        }
+
+        let guard = self.write_lock.lock().unwrap();
+        let (guard, index) = self.prepare_contiguous_slice(iter_len, guard);
+
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+        debug_assert!(iter_len <= bucket_len(bucket, self.bucket_offset) - bucket_index);
+        let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
+
+        // SAFETY:
+        // - The iterator length is trusted to be correct,
+        // - bucket_pointer is non-null, properly aligned and points to an allocated
+        //   bucket, as ensured by get_bucket_ptr(),
+        // - items starting at bucket_index within this bucket are not yet initialized,
+        //   as ensured by prepare_contiguous_slice(),
+        // - no concurrent writes happen on this AppendVec, as the write lock is held,
+        // - no concurrent reads happen beyond bucket_index on this bucket, as the
+        //   length is only updated below, using a Release ordering.
+        unsafe { self.move_iterator(bucket_ptr, bucket_index, iter) };
+        self.len.store(index + iter_len, Ordering::Release);
+
+        drop(guard);
+
+        index..index + iter_len
+    }
+
+    /// Adds all the items from the given iterator to this collection, and
+    /// returns the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice.
+    ///
+    /// # Safety
+    ///
+    /// - This function requires the iterator length to be correct.
+    unsafe fn push_iterator_mut(&mut self, iter: impl ExactSizeIterator<Item = T>) -> Range<usize> {
+        let iter_len = iter.len();
+        if iter_len == 0 {
+            return 0..0;
+        }
+
+        let index = self.prepare_contiguous_slice_mut(iter_len);
+
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+        debug_assert!(iter_len <= bucket_len(bucket, self.bucket_offset) - bucket_index);
+        let bucket_ptr = self.get_bucket_ptr_mut(bucket);
+
+        // SAFETY:
+        // - The iterator length is trusted to be correct,
+        // - bucket_pointer is non-null, properly aligned and points to an allocated
+        //   bucket, as ensured by get_bucket_ptr_mut(),
+        // - items starting at bucket_index within this bucket are not yet initialized,
+        //   as ensured by prepare_contiguous_slice_mut(),
+        // - no concurrent reads nor writes happen on this AppendVec, as this function
+        //   holds an exclusive reference to it.
+        unsafe { self.move_iterator(bucket_ptr, bucket_index, iter) };
+        self.len.store(index + iter_len, Ordering::Release);
+
+        index..index + iter_len
+    }
+
+    /// Moves items from the given iterator into indices starting at
+    /// `bucket_index` in the bucket starting at `bucket_ptr`.
+    ///
+    /// # Safety
+    ///
+    /// - The iterator length `iter.len()` must be correct.
+    /// - The bucket pointer must be non-null, properly aligned and point to an
+    ///   allocated bucket of `bucket_len` items belonging to this
+    ///   [`AppendVec`], such that `bucket_index + iter.len() <= bucket_len`.
+    /// - Items starting at `bucket_index` within the bucket must not be
+    ///   initialized.
+    /// - No concurrent reads or writes to the items starting at `bucket_index`
+    ///   happen.
+    unsafe fn move_iterator(
+        &self,
+        bucket_ptr: *mut T,
+        bucket_index: usize,
+        iter: impl ExactSizeIterator<Item = T>,
+    ) {
+        for (i, item) in iter.enumerate() {
+            // SAFETY:
+            // - the entire range between bucket_ptr and ptr is derived from one allocation
+            //   of bucket_len(bucket) items, as 0 <= bucket_index + slice.len() <=
+            //   bucket_len(bucket).
+            // - (bucket_index + i) * size_of::<T>() fits in an isize, as promised by the
+            //   bucketize() function, with an input index <= Self::MAX_LEN,
+            let ptr = unsafe { bucket_ptr.add(bucket_index + i) };
+
+            // SAFETY:
+            // - ptr is properly aligned, non-null with correct provenance, because it's
+            //   derived from bucket_ptr which is itself aligned as it was allocated from a
+            //   boxed slice of Ts,
+            // - ptr points to a non-initialized memory slot, as it is beyond bucket_index,
+            // - ptr is valid for exclusive writes, as no concurrent reads or writes happen
+            //   beyond bucket_index.
+            unsafe { std::ptr::write(ptr, item) };
+        }
+    }
+
     fn prepare_contiguous_slice_mut(&mut self, slice_len: usize) -> usize {
         let mut index = self.len.load(Ordering::Relaxed);
         assert!(
@@ -1878,6 +2140,154 @@ mod test {
                     for j in 0..NUM_ITEMS {
                         let slice: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
                         assert!(v.push_slice(&slice).start >= SLICE_LEN * j);
+                    }
+                });
+            }
+        });
+        assert_eq!(v.len(), NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
+    }
+
+    #[test]
+    fn test_push_owned_slice_with_little_capacity() {
+        const SLICE_LEN: usize = 7;
+
+        for capacity in [0, SLICE_LEN] {
+            let v: AppendVec<Box<usize>> = AppendVec::with_capacity(capacity);
+            thread::scope(|s| {
+                for _ in 0..NUM_READERS {
+                    s.spawn(|| {
+                        loop {
+                            let len = v.len();
+                            if len > 0 {
+                                let last = len - SLICE_LEN;
+                                let slice = &v[last..len];
+                                assert!(*slice[0] * SLICE_LEN <= last);
+                                for i in 1..SLICE_LEN {
+                                    assert_eq!(slice[i], slice[0]);
+                                }
+                                if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                for _ in 0..NUM_WRITERS {
+                    s.spawn(|| {
+                        for j in 0..NUM_ITEMS {
+                            let vec = vec![Box::new(j); SLICE_LEN];
+                            assert!(v.push_owned_slice(vec).start >= SLICE_LEN * j);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_push_owned_slice_with_enough_capacity() {
+        const SLICE_LEN: usize = 7;
+
+        let v: AppendVec<Box<usize>> =
+            AppendVec::with_capacity(NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let len = v.len();
+                        if len > 0 {
+                            let last = len - SLICE_LEN;
+                            let slice = &v[last..len];
+                            assert!(*slice[0] * SLICE_LEN <= last);
+                            for i in 1..SLICE_LEN {
+                                assert_eq!(slice[i], slice[0]);
+                            }
+                            if len == NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        let vec = vec![Box::new(j); SLICE_LEN];
+                        assert!(v.push_owned_slice(vec).start >= SLICE_LEN * j);
+                    }
+                });
+            }
+        });
+        assert_eq!(v.len(), NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
+    }
+
+    #[test]
+    fn test_push_array_with_little_capacity() {
+        const SLICE_LEN: usize = 7;
+
+        for capacity in [0, SLICE_LEN] {
+            let v: AppendVec<Box<usize>> = AppendVec::with_capacity(capacity);
+            thread::scope(|s| {
+                for _ in 0..NUM_READERS {
+                    s.spawn(|| {
+                        loop {
+                            let len = v.len();
+                            if len > 0 {
+                                let last = len - SLICE_LEN;
+                                let slice = &v[last..len];
+                                assert!(*slice[0] * SLICE_LEN <= last);
+                                for i in 1..SLICE_LEN {
+                                    assert_eq!(slice[i], slice[0]);
+                                }
+                                if len >= NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                for _ in 0..NUM_WRITERS {
+                    s.spawn(|| {
+                        for j in 0..NUM_ITEMS {
+                            let array: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                            assert!(v.push_array(array).start >= SLICE_LEN * j);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_push_array_with_enough_capacity() {
+        const SLICE_LEN: usize = 7;
+
+        let v: AppendVec<Box<usize>> =
+            AppendVec::with_capacity(NUM_WRITERS * SLICE_LEN * NUM_ITEMS);
+        thread::scope(|s| {
+            for _ in 0..NUM_READERS {
+                s.spawn(|| {
+                    loop {
+                        let len = v.len();
+                        if len > 0 {
+                            let last = len - SLICE_LEN;
+                            let slice = &v[last..len];
+                            assert!(*slice[0] * SLICE_LEN <= last);
+                            for i in 1..SLICE_LEN {
+                                assert_eq!(slice[i], slice[0]);
+                            }
+                            if len == NUM_WRITERS * SLICE_LEN * NUM_ITEMS {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            for _ in 0..NUM_WRITERS {
+                s.spawn(|| {
+                    for j in 0..NUM_ITEMS {
+                        let array: [Box<usize>; SLICE_LEN] = array::from_fn(|_| Box::new(j));
+                        assert!(v.push_array(array).start >= SLICE_LEN * j);
                     }
                 });
             }
