@@ -4,7 +4,7 @@ jobs:
   rustdoc:
     runs-on: ubuntu-latest
     env:
-      RUSTDOCFLAGS: "-Z unstable-options --generate-link-to-definition"
+      RUSTDOCFLAGS: "-D warnings -Z unstable-options --generate-link-to-definition"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
