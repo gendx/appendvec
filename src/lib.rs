@@ -590,7 +590,7 @@ impl<T: Default> AppendVec<T> {
     /// ```
     pub fn push_owned_slice(&self, owned_slice: Vec<T>) -> Range<usize> {
         // SAFETY: The length of an iterator on Vec is trusted.
-        unsafe { self.push_iterator(owned_slice.into_iter()) }
+        unsafe { self.push_contiguous(owned_slice.into_iter()) }
     }
 
     /// Moves the given contiguous slice of items to this collection, and
@@ -627,7 +627,7 @@ impl<T: Default> AppendVec<T> {
     /// ```
     pub fn push_owned_slice_mut(&mut self, owned_slice: Vec<T>) -> Range<usize> {
         // SAFETY: The length of an iterator on Vec is trusted.
-        unsafe { self.push_iterator_mut(owned_slice.into_iter()) }
+        unsafe { self.push_contiguous_mut(owned_slice.into_iter()) }
     }
 
     /// Moves the given array of items to this collection, and returns the range
@@ -665,7 +665,7 @@ impl<T: Default> AppendVec<T> {
     /// ```
     pub fn push_array<const N: usize>(&self, array: [T; N]) -> Range<usize> {
         // SAFETY: The length of an array iterator is trusted.
-        unsafe { self.push_iterator(array.into_iter()) }
+        unsafe { self.push_contiguous(array.into_iter()) }
     }
 
     /// Moves the given array of items to this collection, and returns the range
@@ -702,7 +702,7 @@ impl<T: Default> AppendVec<T> {
     /// ```
     pub fn push_array_mut<const N: usize>(&mut self, array: [T; N]) -> Range<usize> {
         // SAFETY: The length of an array iterator is trusted.
-        unsafe { self.push_iterator_mut(array.into_iter()) }
+        unsafe { self.push_contiguous_mut(array.into_iter()) }
     }
 
     /// Adds all the items from the given iterator to this collection, and
@@ -711,10 +711,15 @@ impl<T: Default> AppendVec<T> {
     /// The items are guaranteed to be pushed contiguously, so that indexing the
     /// result allows to retrieve back a contiguous slice.
     ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`push_contiguous_mut()`](Self::push_contiguous_mut) is more efficient
+    /// as it avoids acquiring a write lock.
+    ///
     /// # Safety
     ///
-    /// - This function requires the iterator length to be correct.
-    unsafe fn push_iterator(&self, iter: impl ExactSizeIterator<Item = T>) -> Range<usize> {
+    /// This function requires the iterator length to be correct. This is akin
+    /// to the nightly-only [`TrustedLen`](std::iter::TrustedLen) trait.
+    pub unsafe fn push_contiguous(&self, iter: impl ExactSizeIterator<Item = T>) -> Range<usize> {
         let iter_len = iter.len();
         if iter_len == 0 {
             return 0..0;
@@ -750,10 +755,18 @@ impl<T: Default> AppendVec<T> {
     /// The items are guaranteed to be pushed contiguously, so that indexing the
     /// result allows to retrieve back a contiguous slice.
     ///
+    /// Contrary to [`push_contiguous()`](Self::push_contiguous), no write lock
+    /// is held internally because this function already takes an exclusive
+    /// mutable reference to this collection.
+    ///
     /// # Safety
     ///
-    /// - This function requires the iterator length to be correct.
-    unsafe fn push_iterator_mut(&mut self, iter: impl ExactSizeIterator<Item = T>) -> Range<usize> {
+    /// This function requires the iterator length to be correct. This is akin
+    /// to the nightly-only [`TrustedLen`](std::iter::TrustedLen) trait.
+    pub unsafe fn push_contiguous_mut(
+        &mut self,
+        iter: impl ExactSizeIterator<Item = T>,
+    ) -> Range<usize> {
         let iter_len = iter.len();
         if iter_len == 0 {
             return 0..0;
