@@ -1,14 +1,14 @@
 # AppendVec: a concurrent append-only container of immutable values
 
 [![Crate](https://img.shields.io/crates/v/appendvec.svg?logo=rust)](https://crates.io/crates/appendvec)
-[![Documentation](https://img.shields.io/docsrs/appendvec/0.1.5?logo=rust)](https://docs.rs/appendvec/0.1.5/)
-[![Minimum Rust 1.85.0](https://img.shields.io/crates/msrv/appendvec/0.1.5.svg?logo=rust&color=orange)](https://releases.rs/docs/1.85.0/)
-[![Lines of Code](https://www.aschey.tech/tokei/github/gendx/appendvec?category=code&branch=0.1.5)](https://github.com/gendx/appendvec/tree/0.1.5)
-[![Dependencies](https://deps.rs/crate/appendvec/0.1.5/status.svg)](https://deps.rs/crate/appendvec/0.1.5)
-[![License](https://img.shields.io/crates/l/appendvec/0.1.5.svg)](https://github.com/gendx/appendvec/blob/0.1.5/LICENSE)
-[![Codecov](https://codecov.io/gh/gendx/appendvec/branch/0.1.5/graph/badge.svg)](https://app.codecov.io/gh/gendx/appendvec/tree/0.1.5)
-[![Build Status](https://github.com/gendx/appendvec/actions/workflows/build.yml/badge.svg?branch=0.1.5)](https://github.com/gendx/appendvec/actions/workflows/build.yml)
-[![Test Status](https://github.com/gendx/appendvec/actions/workflows/tests.yml/badge.svg?branch=0.1.5)](https://github.com/gendx/appendvec/actions/workflows/tests.yml)
+[![Documentation](https://img.shields.io/docsrs/appendvec?logo=rust)](https://docs.rs/appendvec)
+[![Minimum Rust 1.85.0](https://img.shields.io/badge/rust-1.85.0%2B-orange.svg?logo=rust)](https://releases.rs/docs/1.85.0/)
+[![Lines of Code](https://www.aschey.tech/tokei/github/gendx/appendvec?category=code&branch=main)](https://github.com/gendx/appendvec)
+[![Dependencies](https://deps.rs/repo/github/gendx/appendvec/status.svg)](https://deps.rs/repo/github/gendx/appendvec)
+[![License](https://img.shields.io/crates/l/appendvec.svg)](https://github.com/gendx/appendvec/blob/main/LICENSE)
+[![Codecov](https://codecov.io/gh/gendx/appendvec/branch/main/graph/badge.svg)](https://app.codecov.io/gh/gendx/appendvec/tree/main)
+[![Build Status](https://github.com/gendx/appendvec/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/gendx/appendvec/actions/workflows/build.yml)
+[![Test Status](https://github.com/gendx/appendvec/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gendx/appendvec/actions/workflows/tests.yml)
 
 This container data structure ensures that reads return stable references and
 can happen concurrently to a write.

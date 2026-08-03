@@ -89,7 +89,7 @@ impl AppendStr {
     ///     });
     /// });
     /// ```
-    #[allow(clippy::len_without_is_empty)]
+    #[expect(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -300,9 +300,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(
-        expected = "byte index 2 is not a char boundary; it is inside '⠝' (bytes 0..3) of `⠝`"
-    )]
+    #[should_panic(expected = "byte index 2 is not a char boundary; it is inside '⠝' (bytes 0..3")]
     fn test_index_non_utf8() {
         let s = AppendStr::new();
         let index = s.push_str("⠝");

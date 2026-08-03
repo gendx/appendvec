@@ -119,7 +119,6 @@ impl<T> AppendVec<T> {
     ///     assert_eq!(container[index], i);
     /// }
     /// ```
-    #[allow(clippy::needless_range_loop)]
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(
             capacity <= Self::MAX_LEN,
@@ -187,7 +186,7 @@ impl<T> AppendVec<T> {
     ///     });
     /// });
     /// ```
-    #[allow(clippy::len_without_is_empty)]
+    #[expect(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Acquire)
     }
@@ -259,8 +258,8 @@ impl<T> AppendVec<T> {
     /// bugs!
     ///
     /// See also [`push_mut()`](Self::push_mut), which is more efficient if
-    /// you hold a mutable reference to this [`AppendVec`] as it avoid acquiring
-    /// a write lock.
+    /// you hold a mutable reference to this [`AppendVec`] as it avoids
+    /// acquiring a write lock.
     ///
     /// # Panics
     ///
