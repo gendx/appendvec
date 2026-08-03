@@ -1,11 +1,14 @@
 //! A concurrent append-only string.
 
 use super::{AppendVec, bucket_len, bucketize};
+#[cfg(feature = "get-size2")]
+use get_size2::GetSize;
 use std::ops::{Index, Range};
 use std::sync::atomic::Ordering;
 
 /// A concurrent append-only [`String`]-like container.
 #[derive(Default)]
+#[cfg_attr(feature = "get-size2", derive(GetSize))]
 pub struct AppendStr {
     inner: AppendVec<u8>,
 }

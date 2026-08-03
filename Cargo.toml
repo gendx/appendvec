@@ -12,7 +12,13 @@ edition = "2024"
 rust-version = "1.85.0"
 
 [package.metadata.docs.rs]
-rustdoc-args = ["--generate-link-to-definition"]
+features = ["get-size2"]
+rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]
+
+[features]
+default = []
+get-size2 = ["dep:get-size2"]
 
 [dependencies]
 crossbeam-utils = "0.8.21"
+get-size2 = { optional = true, version = "0.11.0", default-features = false, features = ["derive"] }

@@ -4,10 +4,10 @@ jobs:
   rustdoc:
     runs-on: ubuntu-latest
     env:
-      RUSTDOCFLAGS: "-D warnings -Z unstable-options --generate-link-to-definition"
+      RUSTDOCFLAGS: "-D warnings --cfg docsrs -Z unstable-options --generate-link-to-definition"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
 
       - name: Build documentation
-        run: cargo doc --verbose --no-deps
+        run: cargo doc --verbose --features=get-size2 --no-deps

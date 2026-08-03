@@ -8,10 +8,13 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 #![cfg_attr(not(test), forbid(clippy::undocumented_unsafe_blocks))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod str;
 
 use crossbeam_utils::CachePadded;
+#[cfg(feature = "get-size2")]
+use get_size2::{GetSize, GetSizeTracker};
 use std::mem::MaybeUninit;
 use std::ops::{Index, Range};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -74,6 +77,30 @@ unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
 impl<T> Default for AppendVec<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(feature = "get-size2")]
+impl<T: GetSize> GetSize for AppendVec<T> {
+    fn get_heap_size_with_tracker<Tr: GetSizeTracker>(&self, tracker: Tr) -> (usize, Tr) {
+        let iter = self.iter();
+
+        let mut allocated_items = 0;
+        if iter.len != 0 {
+            let (max_bucket, _) = bucketize(iter.len - 1, iter.bucket_offset);
+            allocated_items += bucket_len(0, iter.bucket_offset);
+            for bucket in iter.bucket_offset as usize..=max_bucket {
+                allocated_items += bucket_len(bucket, iter.bucket_offset);
+            }
+        }
+        let allocated_size = allocated_items * T::get_stack_size();
+
+        let (size, tracker) = iter.fold((0, tracker), |(size, tracker), item| {
+            let (item_size, tracker) = T::get_heap_size_with_tracker(item, tracker);
+            (size + item_size, tracker)
+        });
+
+        (size + allocated_size, tracker)
     }
 }
 

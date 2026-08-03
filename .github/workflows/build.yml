@@ -14,10 +14,14 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
 
-      - name: Build
+      - name: Build (default features)
         run: cargo build --verbose --all
+      - name: Build (no default features)
+        run: cargo build --verbose --all --no-default-features
+      - name: Build (all features)
+        run: cargo build --verbose --all --all-features
