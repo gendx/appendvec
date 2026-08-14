@@ -85,15 +85,7 @@ impl<T: GetSize> GetSize for AppendVec<T> {
     fn get_heap_size_with_tracker<Tr: GetSizeTracker>(&self, tracker: Tr) -> (usize, Tr) {
         let iter = self.iter();
 
-        let mut allocated_items = 0;
-        if iter.len != 0 {
-            let (max_bucket, _) = bucketize(iter.len - 1, iter.bucket_offset);
-            allocated_items += bucket_len(0, iter.bucket_offset);
-            for bucket in iter.bucket_offset as usize..=max_bucket {
-                allocated_items += bucket_len(bucket, iter.bucket_offset);
-            }
-        }
-        let allocated_size = allocated_items * T::get_stack_size();
+        let allocated_size = self.capacity_(iter.len) * T::get_stack_size();
 
         let (size, tracker) = iter.fold((0, tracker), |(size, tracker), item| {
             let (item_size, tracker) = T::get_heap_size_with_tracker(item, tracker);
@@ -267,6 +259,30 @@ impl<T> AppendVec<T> {
     /// ```
     pub unsafe fn len_unsynchronized(&self) -> usize {
         self.len.load(Ordering::Relaxed)
+    }
+
+    /// Returns the space allocated in this collection, in number of items.
+    ///
+    /// Given that writes can happen concurrently, beware of
+    /// [TOCTOU](https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use)
+    /// bugs! The value returned here is only a lower-bound of the collection
+    /// capacity.
+    pub fn capacity(&self) -> usize {
+        let len = self.len.load(Ordering::Acquire);
+        self.capacity_(len)
+    }
+
+    fn capacity_(&self, len: usize) -> usize {
+        if len == 0 {
+            0
+        } else {
+            let (max_bucket, _) = bucketize(len - 1, self.bucket_offset);
+            if max_bucket == 0 {
+                1 << self.bucket_offset
+            } else {
+                1 << (max_bucket + 1)
+            }
+        }
     }
 
     /// Adds the given item to this collection and returns the index at
