@@ -891,7 +891,11 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     fn prepare_contiguous_slice_mut(&mut self, slice_len: usize) -> usize {
         let mut index = self.len.load(Ordering::Relaxed);
         assert!(
-            slice_len <= Self::MAX_LEN - index,
+            slice_len <= Self::MAX_LEN + 1 - index,
+            "AppendVec is full: cannot push"
+        );
+        assert!(
+            slice_len <= bucket_len(SLOTS - 1, self.bucket_offset),
             "AppendVec is full: cannot push"
         );
 
@@ -902,6 +906,7 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
                 break;
             }
 
+            // Fill the bucket with default values, to allow reading it safely.
             let bucket_ptr = self.get_bucket_ptr_mut(bucket);
             for i in bucket_index..bucket_len {
                 // SAFETY:
@@ -931,7 +936,12 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         guard: MutexGuard<'guard, ()>,
     ) -> (MutexGuard<'guard, ()>, usize) {
         let mut index = self.len.load(Ordering::Relaxed);
-        if slice_len > Self::MAX_LEN - index {
+        if slice_len > Self::MAX_LEN + 1 - index {
+            // Drop the guard before panicking to avoid poisoning the Mutex.
+            drop(guard);
+            panic!("AppendVec is full: cannot push");
+        }
+        if slice_len > bucket_len(SLOTS - 1, self.bucket_offset) {
             // Drop the guard before panicking to avoid poisoning the Mutex.
             drop(guard);
             panic!("AppendVec is full: cannot push");
@@ -944,6 +954,7 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
                 break;
             }
 
+            // Fill the bucket with default values, to allow reading it safely.
             let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
             for i in bucket_index..bucket_len {
                 // SAFETY:
@@ -1840,6 +1851,80 @@ mod test {
                 assert_eq!(v[i], 0);
             }
         }
+    }
+
+    #[test]
+    fn test_push_slices_fill() {
+        let v: AppendVec<u8, 16> = AppendVec::new();
+        let index = v.push_slice(&[0, 0]);
+        assert_eq!(&v[index], &[0, 0]);
+
+        for i in 1..16 {
+            assert_eq!(v.len(), 1 << i);
+            let data = vec![i; 1 << i];
+            let index = v.push_slice(&data);
+            assert_eq!(&v[index], &data);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "AppendVec is full: cannot push")]
+    fn test_push_slices_full() {
+        let v: AppendVec<u8, 16> = AppendVec::new();
+        let index = v.push_slice(&[0, 0]);
+        assert_eq!(&v[index], &[0, 0]);
+
+        for i in 1..16 {
+            assert_eq!(v.len(), 1 << i);
+            let data = vec![i; 1 << i];
+            let index = v.push_slice(&data);
+            assert_eq!(&v[index], &data);
+        }
+
+        v.push_slice(&[42]);
+    }
+
+    #[test]
+    fn test_push_slices_mut_fill() {
+        let mut v: AppendVec<u8, 16> = AppendVec::new();
+        let index = v.push_slice_mut(&[0, 0]);
+        assert_eq!(&v[index], &[0, 0]);
+
+        for i in 1..16 {
+            assert_eq!(v.len(), 1 << i);
+            let data = vec![i; 1 << i];
+            let index = v.push_slice_mut(&data);
+            assert_eq!(&v[index], &data);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "AppendVec is full: cannot push")]
+    fn test_push_slices_mut_full() {
+        let mut v: AppendVec<u8, 16> = AppendVec::new();
+        let index = v.push_slice_mut(&[0, 0]);
+        assert_eq!(&v[index], &[0, 0]);
+
+        for i in 1..16 {
+            assert_eq!(v.len(), 1 << i);
+            let data = vec![i; 1 << i];
+            let index = v.push_slice_mut(&data);
+            assert_eq!(&v[index], &data);
+        }
+
+        v.push_slice_mut(&[42]);
+    }
+
+    #[test]
+    #[should_panic(expected = "AppendVec is full: cannot push")]
+    fn test_push_slice_mut_full() {
+        let mut v: AppendVec<u8, 16> = AppendVec::new();
+
+        let i = v.push_mut(42);
+        assert_eq!(v[i], 42);
+
+        let data = vec![43; 0xfffe];
+        v.push_slice_mut(&data);
     }
 
     const NUM_READERS: usize = 4;
