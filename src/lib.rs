@@ -54,7 +54,7 @@ pub use str::AppendStr;
 /// and [`Sync`]. Indeed, sharing or sending an [`AppendVec`] allows retrieving
 /// const references to `T` and moving values of type `T` across threads (where
 /// the value is pushed vs. where it is dropped).
-pub struct AppendVec<T> {
+pub struct AppendVec<T, const SLOTS: usize = { usize::BITS as usize }> {
     /// Length of the collection.
     len: CachePadded<AtomicUsize>,
     /// Base-2 logarithm of the size of the first bucket.
@@ -62,26 +62,29 @@ pub struct AppendVec<T> {
     /// Pointers to allocated buckets of growing size, or null for
     /// not-yet-allocated buckets. [`bucket_len()`] gives the constant size of
     /// each bucket.
-    buckets: [AtomicPtr<T>; usize::BITS as usize],
+    buckets: [AtomicPtr<T>; SLOTS],
     /// Lock held during [`push()`](Self::push) operations.
     write_lock: Mutex<()>,
 }
 
 // SAFETY: Sending an AppendVec allows (1) retrieving a &T on another thread and
 // (2) dropping T on another thread.
-unsafe impl<T: Send + Sync> Send for AppendVec<T> {}
+unsafe impl<T: Send + Sync, const SLOTS: usize> Send for AppendVec<T, SLOTS> {}
 // SAFETY: Sharing an AppendVec allows (1) retrieving a &T on another thread and
 // (2) importing T from another thread, via the push() method.
-unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
+unsafe impl<T: Send + Sync, const SLOTS: usize> Sync for AppendVec<T, SLOTS> {}
 
-impl<T> Default for AppendVec<T> {
+impl<T, const SLOTS: usize> Default for AppendVec<T, SLOTS> {
     fn default() -> Self {
+        const {
+            assert!(SLOTS as u32 <= usize::BITS);
+        }
         Self::new()
     }
 }
 
 #[cfg(feature = "get-size2")]
-impl<T: GetSize> GetSize for AppendVec<T> {
+impl<T: GetSize, const SLOTS: usize> GetSize for AppendVec<T, SLOTS> {
     fn get_heap_size_with_tracker<Tr: GetSizeTracker>(&self, tracker: Tr) -> (usize, Tr) {
         let iter = self.iter();
 
@@ -96,24 +99,33 @@ impl<T: GetSize> GetSize for AppendVec<T> {
     }
 }
 
-impl<T> AppendVec<T> {
+impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     const ITEM_SIZE_LOG2: u32 = std::mem::size_of::<T>().next_power_of_two().ilog2();
-    const MAX_LEN: usize = !0 >> (Self::ITEM_SIZE_LOG2 + 1);
+    const UNUSED_BITS: u32 = usize::BITS - SLOTS as u32;
+    const MAX_LEN: usize = !0
+        >> (if Self::UNUSED_BITS == 0 {
+            1
+        } else {
+            Self::UNUSED_BITS
+        } + Self::ITEM_SIZE_LOG2);
 
     /// Creates a new, empty collection.
     ///
     /// ```
     /// use appendvec::AppendVec;
     ///
-    /// let mut container = AppendVec::new();
+    /// let mut container: AppendVec<_> = AppendVec::new();
     /// let index = container.push_mut(42);
     /// assert_eq!(container[index], 42);
     /// ```
     pub fn new() -> Self {
+        const {
+            assert!(SLOTS as u32 <= usize::BITS);
+        }
         Self {
             len: CachePadded::new(AtomicUsize::new(0)),
             bucket_offset: 1,
-            buckets: [const { AtomicPtr::new(std::ptr::null_mut()) }; usize::BITS as usize],
+            buckets: [const { AtomicPtr::new(std::ptr::null_mut()) }; SLOTS],
             write_lock: Mutex::new(()),
         }
     }
@@ -132,20 +144,23 @@ impl<T> AppendVec<T> {
     /// ```
     /// use appendvec::AppendVec;
     ///
-    /// let mut container = AppendVec::with_capacity(42);
+    /// let mut container: AppendVec<_> = AppendVec::with_capacity(42);
     /// for i in 0..42 {
     ///     let index = container.push_mut(i);
     ///     assert_eq!(container[index], i);
     /// }
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
+        const {
+            assert!(SLOTS as u32 <= usize::BITS);
+        }
         assert!(
             capacity <= Self::MAX_LEN,
             "AppendVec: requested capacity is too large for the given type ({capacity}, {})",
             Self::MAX_LEN
         );
 
-        let mut buckets = [std::ptr::null_mut(); usize::BITS as usize];
+        let mut buckets = [std::ptr::null_mut(); SLOTS];
         let bucket_offset = if capacity == 0 {
             1
         } else {
@@ -182,7 +197,7 @@ impl<T> AppendVec<T> {
     /// use appendvec::AppendVec;
     /// use std::thread;
     ///
-    /// let container = AppendVec::with_capacity(42);
+    /// let container: AppendVec<_> = AppendVec::with_capacity(42);
     /// thread::scope(|s| {
     ///     s.spawn(|| {
     ///         for i in 0..42 {
@@ -232,7 +247,7 @@ impl<T> AppendVec<T> {
     /// use std::sync::Barrier;
     /// use std::thread;
     ///
-    /// let container = AppendVec::with_capacity(42);
+    /// let container: AppendVec<_> = AppendVec::with_capacity(42);
     /// let barrier = Barrier::new(2);
     /// thread::scope(|s| {
     ///     s.spawn(|| {
@@ -314,7 +329,7 @@ impl<T> AppendVec<T> {
     ///
     /// // The container isn't mutable, we'll use concurrent interior mutability via the push()
     /// // function.
-    /// let container = AppendVec::with_capacity(42);
+    /// let container: AppendVec<_> = AppendVec::with_capacity(42);
     /// for i in 0..42 {
     ///     let index = container.push(i);
     ///     assert_eq!(container[index], i);
@@ -371,7 +386,7 @@ impl<T> AppendVec<T> {
     /// ```
     /// use appendvec::AppendVec;
     ///
-    /// let mut container = AppendVec::with_capacity(42);
+    /// let mut container: AppendVec<_> = AppendVec::with_capacity(42);
     /// for i in 0..42 {
     ///     let index = container.push_mut(i);
     ///     assert_eq!(container[index], i);
@@ -421,7 +436,7 @@ impl<T> AppendVec<T> {
     /// use std::sync::Barrier;
     /// use std::thread;
     ///
-    /// let container = AppendVec::with_capacity(42);
+    /// let container: AppendVec<_> = AppendVec::with_capacity(42);
     /// let barrier = Barrier::new(2);
     /// thread::scope(|s| {
     ///     s.spawn(|| {
@@ -478,7 +493,7 @@ impl<T> AppendVec<T> {
     /// use appendvec::AppendVec;
     /// use std::thread;
     ///
-    /// let container = AppendVec::with_capacity(42);
+    /// let container: AppendVec<_> = AppendVec::with_capacity(42);
     /// thread::scope(|s| {
     ///     s.spawn(|| {
     ///         for i in 0..42 {
@@ -500,7 +515,7 @@ impl<T> AppendVec<T> {
     ///     });
     /// });
     /// ```
-    pub fn iter(&self) -> AppendVecIter<'_, T> {
+    pub fn iter(&self) -> AppendVecIter<'_, T, SLOTS> {
         AppendVecIter {
             inner: self,
             bucket_offset: self.bucket_offset,
@@ -520,7 +535,7 @@ impl<T> AppendVec<T> {
     /// use appendvec::AppendVec;
     /// use std::thread;
     ///
-    /// let container = AppendVec::new();
+    /// let container: AppendVec<_> = AppendVec::new();
     /// thread::scope(|s| {
     ///     s.spawn(|| {
     ///         for i in 0..42 {
@@ -544,7 +559,7 @@ impl<T> AppendVec<T> {
     ///     });
     /// });
     /// ```
-    pub fn iter_chunks(&self) -> AppendVecChunksIter<'_, T> {
+    pub fn iter_chunks(&self) -> AppendVecChunksIter<'_, T, SLOTS> {
         let len = self.len.load(Ordering::Acquire);
         let (bucket, (max_bucket, max_index)) = if len == 0 {
             (self.bucket_offset as usize, (0, 0))
@@ -597,7 +612,7 @@ impl<T> AppendVec<T> {
     }
 }
 
-impl<T: Default> AppendVec<T> {
+impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// Moves the given contiguous slice of items to this collection, and
     /// returns the range at which they were added.
     ///
@@ -956,7 +971,7 @@ impl<T: Default> AppendVec<T> {
     }
 }
 
-impl<T: Clone + Default> AppendVec<T> {
+impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// Adds the given contiguous slice of items to this collection, and returns
     /// the range at which they were added.
     ///
@@ -1108,7 +1123,7 @@ impl<T: Clone + Default> AppendVec<T> {
     }
 }
 
-impl<T: Copy + Default> AppendVec<T> {
+impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// Adds the given contiguous slice of items to this collection, and returns
     /// the range at which they were added.
     ///
@@ -1133,7 +1148,7 @@ impl<T: Copy + Default> AppendVec<T> {
     /// ```
     /// use appendvec::AppendVec;
     ///
-    /// let container = AppendVec::new();
+    /// let container: AppendVec<_> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
     ///     let index = container.push_slice_copy(blob.as_slice());
@@ -1192,7 +1207,7 @@ impl<T: Copy + Default> AppendVec<T> {
     /// ```
     /// use appendvec::AppendVec;
     ///
-    /// let mut container = AppendVec::new();
+    /// let mut container: AppendVec<_> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
     ///     let index = container.push_slice_copy_mut(blob.as_slice());
@@ -1256,7 +1271,7 @@ impl<T: Copy + Default> AppendVec<T> {
     }
 }
 
-impl<T> Drop for AppendVec<T> {
+impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
     fn drop(&mut self) {
         let len = self.len.load(Ordering::Acquire);
         if len == 0 {
@@ -1306,7 +1321,7 @@ impl<T> Drop for AppendVec<T> {
     }
 }
 
-impl<T> Index<usize> for AppendVec<T> {
+impl<T, const SLOTS: usize> Index<usize> for AppendVec<T, SLOTS> {
     type Output = T;
 
     /// Obtain a reference to the item at the given index.
@@ -1345,7 +1360,7 @@ impl<T> Index<usize> for AppendVec<T> {
     }
 }
 
-impl<T> Index<Range<usize>> for AppendVec<T> {
+impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
     type Output = [T];
 
     /// # Panics
@@ -1412,8 +1427,8 @@ impl<T> Index<Range<usize>> for AppendVec<T> {
 ///
 /// This is is [`Send`] and [`Sync`] if and only if `T` is [`Sync`], as sharing
 /// or sending this iterator allows retrieving const references to `T`.
-pub struct AppendVecIter<'a, T> {
-    inner: &'a AppendVec<T>,
+pub struct AppendVecIter<'a, T, const SLOTS: usize> {
+    inner: &'a AppendVec<T, SLOTS>,
     bucket_offset: u32,
     len: usize,
     index: usize,
@@ -1421,12 +1436,12 @@ pub struct AppendVecIter<'a, T> {
 }
 
 // SAFETY: Sending an AppendVecIter allows retrieving a &T on another thread.
-unsafe impl<T: Sync> Send for AppendVecIter<'_, T> {}
+unsafe impl<T: Sync, const SLOTS: usize> Send for AppendVecIter<'_, T, SLOTS> {}
 // SAFETY: One cannot do much by sharing an AppendVecIter, but at most it would
 // allow retrieving a &T on another thread.
-unsafe impl<T: Sync> Sync for AppendVecIter<'_, T> {}
+unsafe impl<T: Sync, const SLOTS: usize> Sync for AppendVecIter<'_, T, SLOTS> {}
 
-impl<'a, T> Iterator for AppendVecIter<'a, T> {
+impl<'a, T, const SLOTS: usize> Iterator for AppendVecIter<'a, T, SLOTS> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1468,7 +1483,7 @@ impl<'a, T> Iterator for AppendVecIter<'a, T> {
     }
 }
 
-impl<T> ExactSizeIterator for AppendVecIter<'_, T> {}
+impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecIter<'_, T, SLOTS> {}
 
 /// Iterator over contiguous slices contained in an [`AppendVec`].
 ///
@@ -1484,8 +1499,8 @@ impl<T> ExactSizeIterator for AppendVecIter<'_, T> {}
 ///
 /// This is is [`Send`] and [`Sync`] if and only if `T` is [`Sync`], as sharing
 /// or sending this iterator allows retrieving const references to `T`.
-pub struct AppendVecChunksIter<'a, T> {
-    inner: &'a AppendVec<T>,
+pub struct AppendVecChunksIter<'a, T, const SLOTS: usize> {
+    inner: &'a AppendVec<T, SLOTS>,
     bucket_offset: u32,
     bucket: usize,
     max_bucket: usize,
@@ -1494,12 +1509,12 @@ pub struct AppendVecChunksIter<'a, T> {
 
 // SAFETY: Sending an AppendVecChunksIter allows retrieving a &[T] on another
 // thread.
-unsafe impl<T: Sync> Send for AppendVecChunksIter<'_, T> {}
+unsafe impl<T: Sync, const SLOTS: usize> Send for AppendVecChunksIter<'_, T, SLOTS> {}
 // SAFETY: One cannot do much by sharing an AppendVecChunksIter, but at most it
 // would allow retrieving a &[T] on another thread.
-unsafe impl<T: Sync> Sync for AppendVecChunksIter<'_, T> {}
+unsafe impl<T: Sync, const SLOTS: usize> Sync for AppendVecChunksIter<'_, T, SLOTS> {}
 
-impl<'a, T> Iterator for AppendVecChunksIter<'a, T> {
+impl<'a, T, const SLOTS: usize> Iterator for AppendVecChunksIter<'a, T, SLOTS> {
     type Item = &'a [T];
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1560,7 +1575,7 @@ impl<'a, T> Iterator for AppendVecChunksIter<'a, T> {
     }
 }
 
-impl<T> ExactSizeIterator for AppendVecChunksIter<'_, T> {}
+impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecChunksIter<'_, T, SLOTS> {}
 
 /// Decomposes the given `index` into the bucket that contains it and the index
 /// within that bucket.
@@ -1640,6 +1655,48 @@ mod test {
     }
 
     #[test]
+    fn test_max_len_custom_bits() {
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(AppendVec::<u8, 64>::MAX_LEN, 0x7fff_ffff_ffff_ffff);
+            assert_eq!(AppendVec::<u8, 63>::MAX_LEN, 0x7fff_ffff_ffff_ffff);
+            assert_eq!(AppendVec::<u8, 62>::MAX_LEN, 0x3fff_ffff_ffff_ffff);
+
+            assert_eq!(AppendVec::<u8, 32>::MAX_LEN, 0xffff_ffff);
+            assert_eq!(AppendVec::<u16, 32>::MAX_LEN, 0x7fff_ffff);
+            assert_eq!(AppendVec::<u32, 32>::MAX_LEN, 0x3fff_ffff);
+            assert_eq!(AppendVec::<u64, 32>::MAX_LEN, 0x1fff_ffff);
+
+            // The implementation uses the next power of 2.
+            assert_eq!(AppendVec::<[u8; 2], 32>::MAX_LEN, 0x7fff_ffff);
+            assert_eq!(AppendVec::<[u8; 3], 32>::MAX_LEN, 0x3fff_ffff);
+            assert_eq!(AppendVec::<[u8; 4], 32>::MAX_LEN, 0x3fff_ffff);
+            assert_eq!(AppendVec::<[u8; 5], 32>::MAX_LEN, 0x1fff_ffff);
+            assert_eq!(AppendVec::<[u8; 6], 32>::MAX_LEN, 0x1fff_ffff);
+            assert_eq!(AppendVec::<[u8; 7], 32>::MAX_LEN, 0x1fff_ffff);
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            assert_eq!(AppendVec::<u8, 32>::MAX_LEN, 0x7fff_ffff);
+            assert_eq!(AppendVec::<u8, 31>::MAX_LEN, 0x7fff_ffff);
+            assert_eq!(AppendVec::<u8, 30>::MAX_LEN, 0x3fff_ffff);
+
+            assert_eq!(AppendVec::<u8, 16>::MAX_LEN, 0xffff);
+            assert_eq!(AppendVec::<u16, 16>::MAX_LEN, 0x7fff);
+            assert_eq!(AppendVec::<u32, 16>::MAX_LEN, 0x3fff);
+            assert_eq!(AppendVec::<u64, 16>::MAX_LEN, 0x1fff);
+
+            // The implementation uses the next power of 2.
+            assert_eq!(AppendVec::<[u8; 2], 16>::MAX_LEN, 0x7fff);
+            assert_eq!(AppendVec::<[u8; 3], 16>::MAX_LEN, 0x3fff);
+            assert_eq!(AppendVec::<[u8; 4], 16>::MAX_LEN, 0x3fff);
+            assert_eq!(AppendVec::<[u8; 5], 16>::MAX_LEN, 0x1fff);
+            assert_eq!(AppendVec::<[u8; 6], 16>::MAX_LEN, 0x1fff);
+            assert_eq!(AppendVec::<[u8; 7], 16>::MAX_LEN, 0x1fff);
+        }
+    }
+
+    #[test]
     fn test_bucketize() {
         assert_eq!(bucketize(0, 1), (0, 0));
         assert_eq!(bucketize(1, 1), (0, 1));
@@ -1713,7 +1770,7 @@ mod test {
 
     #[test]
     fn test_push_index() {
-        let v = AppendVec::new();
+        let v: AppendVec<_> = AppendVec::new();
         for i in 0..100 {
             assert_eq!(v.push(i), i);
         }
@@ -1724,7 +1781,7 @@ mod test {
 
     #[test]
     fn test_push_mut_index() {
-        let mut v = AppendVec::new();
+        let mut v: AppendVec<_> = AppendVec::new();
         for i in 0..100 {
             assert_eq!(v.push_mut(i), i);
         }
@@ -1735,7 +1792,7 @@ mod test {
 
     #[test]
     fn test_push_slice_index() {
-        let v = AppendVec::new();
+        let v: AppendVec<_> = AppendVec::new();
         for len in 0..10 {
             let mut prev = 0..0;
             for i in 0..100 {
@@ -1751,7 +1808,7 @@ mod test {
 
     #[test]
     fn test_push_slice_mut_index() {
-        let mut v = AppendVec::new();
+        let mut v: AppendVec<_> = AppendVec::new();
         for len in 0..10 {
             let mut prev = 0..0;
             for i in 0..100 {
@@ -1768,7 +1825,7 @@ mod test {
     #[test]
     fn test_push_slice_padding() {
         for len in 1..100 {
-            let v = AppendVec::new();
+            let v: AppendVec<_> = AppendVec::new();
             let range = v.push_slice(&vec![42; len]);
             assert_eq!(range.end - range.start, len);
 

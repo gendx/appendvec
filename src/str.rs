@@ -9,17 +9,17 @@ use std::sync::atomic::Ordering;
 /// A concurrent append-only [`String`]-like container.
 #[derive(Default)]
 #[cfg_attr(feature = "get-size2", derive(GetSize))]
-pub struct AppendStr {
-    inner: AppendVec<u8>,
+pub struct AppendStr<const SLOTS: usize = { usize::BITS as usize }> {
+    inner: AppendVec<u8, SLOTS>,
 }
 
-impl AppendStr {
+impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// Creates a new, empty string.
     ///
     /// ```
     /// use appendvec::AppendStr;
     ///
-    /// let mut container = AppendStr::new();
+    /// let mut container: AppendStr = AppendStr::new();
     /// let index = container.push_str_mut("Hello world!");
     /// assert_eq!(&container[index], "Hello world!");
     /// ```
@@ -38,7 +38,7 @@ impl AppendStr {
     /// ```
     /// use appendvec::AppendStr;
     ///
-    /// let mut container = AppendStr::with_capacity(42);
+    /// let mut container: AppendStr = AppendStr::with_capacity(42);
     /// for i in 0..42 {
     ///     let bytes = [i];
     ///     let s = std::str::from_utf8(&bytes).unwrap();
@@ -66,7 +66,7 @@ impl AppendStr {
     /// use appendvec::AppendStr;
     /// use std::thread;
     ///
-    /// let container = AppendStr::with_capacity(42);
+    /// let container: AppendStr = AppendStr::with_capacity(42);
     /// thread::scope(|s| {
     ///     s.spawn(|| {
     ///         for i in 0..42 {
@@ -117,7 +117,7 @@ impl AppendStr {
     /// ```
     /// use appendvec::AppendStr;
     ///
-    /// let container = AppendStr::new();
+    /// let container: AppendStr = AppendStr::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
     ///     let s = std::str::from_utf8(blob.as_slice()).unwrap();
@@ -144,7 +144,7 @@ impl AppendStr {
     /// ```
     /// use appendvec::AppendStr;
     ///
-    /// let mut container = AppendStr::new();
+    /// let mut container: AppendStr = AppendStr::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
     ///     let s = std::str::from_utf8(blob.as_slice()).unwrap();
@@ -178,7 +178,7 @@ impl AppendStr {
     /// ```
     /// use appendvec::AppendStr;
     ///
-    /// let container = AppendStr::new();
+    /// let container: AppendStr = AppendStr::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
     ///     let s = std::str::from_utf8(blob.as_slice()).unwrap();
@@ -191,7 +191,7 @@ impl AppendStr {
     }
 }
 
-impl Index<Range<usize>> for AppendStr {
+impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
     type Output = str;
 
     /// # Panics
@@ -271,7 +271,7 @@ mod test {
 
     #[test]
     fn test_2_bytes_utf8() {
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         for _ in 0..100 {
             let index = s.push_str("é");
             assert_eq!(index.end, index.start + 2);
@@ -282,7 +282,7 @@ mod test {
 
     #[test]
     fn test_3_bytes_utf8() {
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         for _ in 0..100 {
             let index = s.push_str("⠝");
             assert_eq!(index.end, index.start + 3);
@@ -293,7 +293,7 @@ mod test {
 
     #[test]
     fn test_4_bytes_utf8() {
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         for _ in 0..100 {
             let index = s.push_str("💖");
             assert_eq!(index.end, index.start + 4);
@@ -305,7 +305,7 @@ mod test {
     #[test]
     #[should_panic(expected = "byte index 2 is not a char boundary; it is inside '⠝' (bytes 0..3")]
     fn test_index_non_utf8() {
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         let index = s.push_str("⠝");
         let _ = s[index.start..index.start + 2];
     }
@@ -322,7 +322,7 @@ mod test {
         const STR: &str = "⠝💖";
         const STR_LEN: usize = STR.len();
 
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         thread::scope(|scope| {
             for _ in 0..NUM_READERS {
                 scope.spawn(|| {
@@ -351,7 +351,7 @@ mod test {
         const STR: &str = "⠝💖";
         const STR_LEN: usize = STR.len();
 
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         thread::scope(|scope| {
             scope.spawn(|| {
                 loop {
@@ -380,7 +380,7 @@ mod test {
         const STR: &str = "⠝💖";
         const STR_LEN: usize = STR.len();
 
-        let s = AppendStr::new();
+        let s: AppendStr = AppendStr::new();
         thread::scope(|scope| {
             for _ in 0..NUM_READERS {
                 scope.spawn(|| {
@@ -412,7 +412,7 @@ mod test {
         const STR_LEN: usize = STR.len();
 
         for capacity in [0, STR_LEN] {
-            let s = AppendStr::with_capacity(capacity);
+            let s: AppendStr = AppendStr::with_capacity(capacity);
             thread::scope(|scope| {
                 for _ in 0..NUM_READERS {
                     scope.spawn(|| {
@@ -444,7 +444,7 @@ mod test {
         const STR: &str = "⠝💖";
         const STR_LEN: usize = STR.len();
 
-        let s = AppendStr::with_capacity(NUM_WRITERS * STR_LEN * NUM_ITEMS);
+        let s: AppendStr = AppendStr::with_capacity(NUM_WRITERS * STR_LEN * NUM_ITEMS);
         thread::scope(|scope| {
             for _ in 0..NUM_READERS {
                 scope.spawn(|| {
