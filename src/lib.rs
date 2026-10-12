@@ -193,6 +193,10 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// To know the index of an added item, use the return value of the
     /// [`push()`](Self::push) function.
     ///
+    /// See also [`len_mut()`](Self::len_mut), which is more efficient if you
+    /// hold a mutable reference to this collection as it avoids using atomic
+    /// operations.
+    ///
     /// ```
     /// use appendvec::AppendVec;
     /// use std::thread;
@@ -223,6 +227,15 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     #[expect(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Acquire)
+    }
+
+    /// Returns the length in bytes of this collection.
+    ///
+    /// Contrary to [`len()`](Self::len), no atomic operations are used
+    /// internally because this function already takes an exclusive mutable
+    /// reference to this collection.
+    pub fn len_mut(&mut self) -> usize {
+        *self.len.get_mut()
     }
 
     /// Returns an estimate of the length of this collection, without performing
@@ -394,7 +407,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn push_mut(&mut self, t: T) -> usize {
-        let index = self.len.load(Ordering::Relaxed);
+        let index = *self.len.get_mut();
         assert_ne!(index, Self::MAX_LEN, "AppendVec is full: cannot push");
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
@@ -414,7 +427,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - ptr is valid for exclusive writes as this function takes an
         //   exclusive `&mut self` parameter.
         unsafe { std::ptr::write(ptr, t) };
-        self.len.store(index + 1, Ordering::Release);
+        *self.len.get_mut() = index + 1;
 
         index
     }
@@ -581,28 +594,19 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// Internal function to retrieve the pointer to the given bucket,
     /// allocating it if it's null.
     fn get_bucket_ptr_mut(&mut self, bucket: usize) -> *mut T {
-        // SAFETY: The caller passed a mutable reference to self, which confirms
-        // exclusive access.
-        unsafe { self.get_bucket_ptr_raw(bucket) }
+        let ptr: &mut *mut T = self.buckets[bucket].get_mut();
+        if ptr.is_null() {
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
+            let allocated = Box::<[T]>::new_uninit_slice(bucket_len);
+            let bucket_ptr = Box::into_raw(allocated) as *mut MaybeUninit<T> as *mut T;
+            *ptr = bucket_ptr;
+        }
+        *ptr
     }
 
     /// Internal function to retrieve the pointer to the given bucket,
     /// allocating it if it's null.
     fn get_bucket_ptr(&self, bucket: usize, _guard: &MutexGuard<()>) -> *mut T {
-        // SAFETY: The caller passed a mutex guard, which confirms exclusive
-        // access.
-        unsafe { self.get_bucket_ptr_raw(bucket) }
-    }
-
-    /// Internal function to retrieve the pointer to the given bucket,
-    /// allocating it if it's null.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure exclusive write access to this object (as a new
-    /// bucket may be allocated), by holding a mutable reference to self or
-    /// the write lock.
-    unsafe fn get_bucket_ptr_raw(&self, bucket: usize) -> *mut T {
         let ptr = self.buckets[bucket].load(Ordering::Relaxed);
         if !ptr.is_null() {
             ptr
@@ -804,11 +808,12 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - no concurrent reads happen beyond bucket_index on this bucket, as
         //   the length is only updated below, using a Release ordering.
         unsafe { self.move_iterator(bucket_ptr, bucket_index, iter) };
-        self.len.store(index + iter_len, Ordering::Release);
+        let new_len = index + iter_len;
+        self.len.store(new_len, Ordering::Release);
 
         drop(guard);
 
-        index..index + iter_len
+        index..new_len
     }
 
     /// Adds all the items from the given iterator to this collection, and
@@ -849,9 +854,10 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - no concurrent reads nor writes happen on this AppendVec, as this
         //   function holds an exclusive reference to it.
         unsafe { self.move_iterator(bucket_ptr, bucket_index, iter) };
-        self.len.store(index + iter_len, Ordering::Release);
+        let new_len = index + iter_len;
+        *self.len.get_mut() = new_len;
 
-        index..index + iter_len
+        index..new_len
     }
 
     /// Moves items from the given iterator into indices starting at
@@ -896,7 +902,7 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     }
 
     fn prepare_contiguous_slice_mut(&mut self, slice_len: usize) -> usize {
-        let mut index = self.len.load(Ordering::Relaxed);
+        let mut index = *self.len.get_mut();
         assert!(
             slice_len <= Self::MAX_LEN + 1 - index,
             "AppendVec is full: cannot push"
@@ -1048,11 +1054,12 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - no concurrent reads happen beyond bucket_index on this bucket, as
         //   the length is only updated below, using a Release ordering.
         unsafe { self.clone_slice(bucket_ptr, bucket_index, slice) };
-        self.len.store(index + slice.len(), Ordering::Release);
+        let new_len = index + slice.len();
+        self.len.store(new_len, Ordering::Release);
 
         drop(guard);
 
-        index..index + slice.len()
+        index..new_len
     }
 
     /// Adds the given contiguous slice of items to this collection, and returns
@@ -1106,9 +1113,10 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - no concurrent reads nor writes happen on this AppendVec, as this
         //   function holds an exclusive reference to it.
         unsafe { self.clone_slice(bucket_ptr, bucket_index, slice) };
-        self.len.store(index + slice.len(), Ordering::Release);
+        let new_len = index + slice.len();
+        *self.len.get_mut() = new_len;
 
-        index..index + slice.len()
+        index..new_len
     }
 
     /// Clones the given slice into indices starting at `bucket_index` in the
@@ -1202,11 +1210,12 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - no concurrent reads happen beyond bucket_index on this bucket, as
         //   the length is only updated below, using a Release ordering.
         unsafe { self.copy_slice(bucket_ptr, bucket_index, slice) };
-        self.len.store(index + slice.len(), Ordering::Release);
+        let new_len = index + slice.len();
+        self.len.store(new_len, Ordering::Release);
 
         drop(guard);
 
-        index..index + slice.len()
+        index..new_len
     }
 
     /// Adds the given contiguous slice of items to this collection, and returns
@@ -1259,9 +1268,10 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // - no concurrent reads nor writes happen on this AppendVec, as this
         //   function holds an exclusive reference to it.
         unsafe { self.copy_slice(bucket_ptr, bucket_index, slice) };
-        self.len.store(index + slice.len(), Ordering::Release);
+        let new_len = index + slice.len();
+        *self.len.get_mut() = new_len;
 
-        index..index + slice.len()
+        index..new_len
     }
 
     /// Copies the given slice into indices starting at `bucket_index` in the
@@ -1301,7 +1311,7 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
 
 impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
     fn drop(&mut self) {
-        let len = self.len.load(Ordering::Acquire);
+        let len = *self.len.get_mut();
         if len == 0 {
             return;
         }
@@ -1319,12 +1329,12 @@ impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
                 max_index + 1
             };
 
-            let ptr: *mut T = self.buckets[bucket].load(Ordering::Relaxed);
+            let ptr: *mut T = *self.buckets[bucket].get_mut();
             let slice: *mut [T] = std::ptr::slice_from_raw_parts_mut(ptr, bucket_items);
             // SAFETY:
             // - slice starts at the aligned and non-null ptr,
             // - slice is valid for reads, as all items until len have been
-            //   written to before, as ensured by the Acquire load on self.len,
+            //   written to before,
             // - slice is valid for writes, as this function takes an exclusive
             //   `&mut self` parameter,
             // - slice is valid for dropping, as it is a part of the leaked

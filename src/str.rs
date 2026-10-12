@@ -62,6 +62,10 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// To know the index of an added item, use the return value of the
     /// [`push_str()`](Self::push_str) function.
     ///
+    /// See also [`len_mut()`](Self::len_mut), which is more efficient if you
+    /// hold a mutable reference to this collection as it avoids using atomic
+    /// operations.
+    ///
     /// ```
     /// use appendvec::AppendStr;
     /// use std::thread;
@@ -95,6 +99,15 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     #[expect(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Returns the length in bytes of this collection.
+    ///
+    /// Contrary to [`len()`](Self::len), no atomic operations are used
+    /// internally because this function already takes an exclusive mutable
+    /// reference to this collection.
+    pub fn len_mut(&mut self) -> usize {
+        self.inner.len_mut()
     }
 
     /// Adds the given string to this collection, and returns the byte range at
