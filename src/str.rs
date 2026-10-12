@@ -202,6 +202,30 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     pub fn get_bytes(&self, index: Range<usize>) -> &[u8] {
         &self.inner[index]
     }
+
+    /// Reduces the size of this collection to the given length.
+    ///
+    /// If the size was already smaller than or equal to `len`, this is a no-op.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the truncated length doesn't fall on a UTF-8
+    /// boundary.
+    pub fn truncate(&mut self, len: usize) {
+        let old_len = self.len_mut();
+        if old_len <= len {
+            return;
+        }
+
+        // If the next byte after the truncation matches the 10...... pattern,
+        // then it's a UTF-8 continuation byte, and it's invalid to
+        // truncate there.
+        if self.inner[len] & 0b1100_0000 == 0b1000_0000 {
+            panic!("attempted to truncate at byte index {len}, which is not a char boundary");
+        }
+
+        self.inner.truncate(len);
+    }
 }
 
 impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
@@ -484,5 +508,83 @@ mod test {
             }
         });
         assert_eq!(s.len(), NUM_WRITERS * STR_LEN * NUM_ITEMS);
+    }
+
+    fn test_truncate(pattern: &str) {
+        let pattern_len = pattern.len();
+
+        let mut s: AppendStr = AppendStr::new();
+        let mut indices: AppendVec<_> = AppendVec::new();
+
+        for _ in 0..100 {
+            let index = s.push_str_mut(pattern);
+            indices.push_mut(index);
+        }
+
+        s.truncate(indices[49].end);
+        indices.truncate(50);
+
+        assert!(s.len_mut() >= pattern_len * 50);
+        for i in indices.iter() {
+            assert_eq!(&s[i.clone()], pattern)
+        }
+
+        for _ in 0..10 {
+            let index = s.push_str_mut(pattern);
+            indices.push_mut(index);
+        }
+
+        assert!(s.len_mut() >= pattern_len * 60);
+        for i in indices.iter() {
+            assert_eq!(&s[i.clone()], pattern)
+        }
+
+        s.truncate(0);
+        indices.truncate(0);
+        assert_eq!(s.len_mut(), 0);
+
+        for _ in 0..20 {
+            let index = s.push_str_mut(pattern);
+            indices.push_mut(index);
+        }
+
+        assert!(s.len_mut() >= pattern_len * 20);
+        for i in indices.iter() {
+            assert_eq!(&s[i.clone()], pattern)
+        }
+    }
+
+    #[test]
+    fn test_truncate_2_bytes_utf8() {
+        const STR: &str = "é";
+        assert_eq!(STR.len(), 2);
+        test_truncate(STR);
+    }
+
+    #[test]
+    fn test_truncate_3_bytes_utf8() {
+        const STR: &str = "⠝";
+        assert_eq!(STR.len(), 3);
+        test_truncate(STR);
+    }
+
+    #[test]
+    fn test_truncate_4_bytes_utf8() {
+        const STR: &str = "💖";
+        assert_eq!(STR.len(), 4);
+        test_truncate(STR);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "attempted to truncate at byte index 5, which is not a char boundary"
+    )]
+    fn test_truncate_non_utf8() {
+        const STR: &str = "💖";
+        assert_eq!(STR.len(), 4);
+
+        let mut s: AppendStr = AppendStr::new();
+        let index = s.push_str_mut(STR);
+        s.truncate(index.start + 1);
     }
 }

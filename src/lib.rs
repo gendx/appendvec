@@ -1309,9 +1309,91 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     }
 }
 
-impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
-    fn drop(&mut self) {
-        let len = *self.len.get_mut();
+impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
+    /// Reduces the size of this collection to the given length.
+    ///
+    /// If the size was already smaller than or equal to `len`, this is a no-op.
+    pub fn truncate(&mut self, len: usize) {
+        let old_len = *self.len.get_mut();
+        if old_len <= len {
+            return;
+        }
+
+        if len == 0 {
+            self.clear(old_len);
+            return;
+        }
+
+        let (start_bucket, start_bucket_index) = bucketize(len - 1, self.bucket_offset);
+        let (end_bucket, end_bucket_index) = bucketize(old_len - 1, self.bucket_offset);
+
+        for bucket in start_bucket..=end_bucket {
+            if bucket != 0 && bucket < self.bucket_offset as usize {
+                continue;
+            }
+
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
+            let bucket_items_start = if bucket != start_bucket {
+                0
+            } else {
+                start_bucket_index + 1
+            };
+            let bucket_items_end = if bucket != end_bucket {
+                bucket_len
+            } else {
+                end_bucket_index + 1
+            };
+
+            let ptr: &mut *mut T = self.buckets[bucket].get_mut();
+            // SAFETY:
+            // - bucket_items_start * size_of::<T>() fits in an isize, as the
+            //   checks within push() and its variants ensure that at most
+            //   Self::MAX_LEN + 1 items are stored in this collection,
+            // - the entire range between ptr and start_ptr is derived from one
+            //   allocation of bucket_len(bucket) items, as 0 <=
+            //   bucket_items_start < bucket_len(bucket).
+            let start_ptr: *mut T = unsafe { ptr.add(bucket_items_start) };
+            let slice: *mut [T] = std::ptr::slice_from_raw_parts_mut(
+                start_ptr,
+                bucket_items_end - bucket_items_start,
+            );
+
+            // SAFETY:
+            // - slice starts at the aligned and non-null ptr,
+            // - slice is valid for reads, as all items until len have been
+            //   written to before,
+            // - slice is valid for writes, as this function takes an exclusive
+            //   `&mut self` parameter,
+            // - slice is valid for dropping, as it is a part of the leaked
+            //   boxed slice of this bucket,
+            // - nothing else is accessing the `slice` while `drop_in_place` is
+            //   executing, as this function takes an exclusive `&mut self`
+            //   parameter.
+            unsafe { std::ptr::drop_in_place(slice) };
+
+            if bucket != start_bucket {
+                // SAFETY:
+                // - ptr has been allocated with the global allocator, as it is
+                //   derived from a leaked boxed slice,
+                // - T has the same alignement as what ptr was allocated with,
+                //   because ptr derives from a boxed slice of Ts,
+                // - ptr was allocated with T * bucket_len bytes,
+                // - the length is zero, therefore lower than or equal to the
+                //   capacity,
+                // - the first 0 values are properly initialized values of type
+                //   T,
+                // - the allocated size in bytes isn't larger than isize::MAX,
+                //   because that's derived from a leaked boxed slice.
+                let vec: Vec<T> = unsafe { Vec::from_raw_parts(*ptr, 0, bucket_len) };
+                drop(vec);
+                *ptr = std::ptr::null_mut();
+            }
+        }
+
+        *self.len.get_mut() = len;
+    }
+
+    fn clear(&mut self, len: usize) {
         if len == 0 {
             return;
         }
@@ -1329,8 +1411,8 @@ impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
                 max_index + 1
             };
 
-            let ptr: *mut T = *self.buckets[bucket].get_mut();
-            let slice: *mut [T] = std::ptr::slice_from_raw_parts_mut(ptr, bucket_items);
+            let ptr: &mut *mut T = self.buckets[bucket].get_mut();
+            let slice: *mut [T] = std::ptr::slice_from_raw_parts_mut(*ptr, bucket_items);
             // SAFETY:
             // - slice starts at the aligned and non-null ptr,
             // - slice is valid for reads, as all items until len have been
@@ -1355,9 +1437,19 @@ impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
             // - the first 0 values are properly initialized values of type T,
             // - the allocated size in bytes isn't larger than isize::MAX,
             //   because that's derived from a leaked boxed slice.
-            let vec: Vec<T> = unsafe { Vec::from_raw_parts(ptr, 0, bucket_len) };
+            let vec: Vec<T> = unsafe { Vec::from_raw_parts(*ptr, 0, bucket_len) };
             drop(vec);
+            *ptr = std::ptr::null_mut();
         }
+
+        *self.len.get_mut() = 0;
+    }
+}
+
+impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
+    fn drop(&mut self) {
+        let len = *self.len.get_mut();
+        self.clear(len);
     }
 }
 
@@ -2609,5 +2701,30 @@ mod test {
                 });
             }
         });
+    }
+
+    #[test]
+    fn test_truncate() {
+        let mut v: AppendVec<_> = AppendVec::new();
+        for i in 0..100 {
+            assert_eq!(v.push_mut(i), i);
+        }
+        assert!(v.iter().copied().eq(0..100));
+
+        v.truncate(50);
+        assert!(v.iter().copied().eq(0..50));
+
+        for i in 0..10 {
+            assert_eq!(v.push_mut(i), 50 + i);
+        }
+        assert!(v.iter().copied().eq((0..50).chain(0..10)));
+
+        v.truncate(0);
+        assert_eq!(v.len_mut(), 0);
+
+        for i in 0..20 {
+            assert_eq!(v.push_mut(i), i);
+        }
+        assert!(v.iter().copied().eq(0..20));
     }
 }
