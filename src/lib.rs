@@ -351,18 +351,19 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         // SAFETY:
         // - bucket_index * size_of::<T>() fits in an isize, as promised by the
         //   bucketize() function, with an input index <= Self::MAX_LEN,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
         let ptr = unsafe { bucket_ptr.add(bucket_index) };
         // SAFETY:
-        // - ptr is properly aligned, non-null with correct provenance, because it's
-        //   derived from bucket_ptr which is itself aligned as it was allocated from a
-        //   boxed slice of Ts,
+        // - ptr is properly aligned, non-null with correct provenance, because
+        //   it's derived from bucket_ptr which is itself aligned as it was
+        //   allocated from a boxed slice of Ts,
         // - ptr is valid for exclusive writes:
-        //   - the Release store on the length just below ensures that no other thread
-        //     is reading the value at the given index (via safe APIs),
-        //   - the write lock ensures that no other thread is ever obtaining the same
-        //     index, i.e. no other thread is ever writing to this index.
+        //   - the Release store on the length just below ensures that no other
+        //     thread is reading the value at the given index (via safe APIs),
+        //   - the write lock ensures that no other thread is ever obtaining the
+        //     same index, i.e. no other thread is ever writing to this index.
         unsafe { std::ptr::write(ptr, t) };
         self.len.store(index + 1, Ordering::Release);
 
@@ -402,15 +403,16 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         // SAFETY:
         // - bucket_index * size_of::<T>() fits in an isize, as promised by the
         //   bucketize() function, with an input index <= Self::MAX_LEN,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
         let ptr = unsafe { bucket_ptr.add(bucket_index) };
         // SAFETY:
-        // - ptr is properly aligned, non-null with correct provenance, because it's
-        //   derived from bucket_ptr which is itself aligned as it was allocated from a
-        //   boxed slice of Ts,
-        // - ptr is valid for exclusive writes as this function takes an exclusive `&mut
-        //   self` parameter.
+        // - ptr is properly aligned, non-null with correct provenance, because
+        //   it's derived from bucket_ptr which is itself aligned as it was
+        //   allocated from a boxed slice of Ts,
+        // - ptr is valid for exclusive writes as this function takes an
+        //   exclusive `&mut self` parameter.
         unsafe { std::ptr::write(ptr, t) };
         self.len.store(index + 1, Ordering::Release);
 
@@ -468,18 +470,19 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         debug_assert_ne!(bucket_ptr, std::ptr::null());
 
         // SAFETY:
-        // - bucket_index * size_of::<T>() fits in an isize, as promised by the caller
-        //   and the checks within push() and push_mut() that ensure that at most
-        //   Self::MAX_LEN + 1 items are stored in this collection,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        // - bucket_index * size_of::<T>() fits in an isize, as promised by the
+        //   caller and the checks within push() and push_mut() that ensure that
+        //   at most Self::MAX_LEN + 1 items are stored in this collection,
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
         let ptr = unsafe { bucket_ptr.add(bucket_index) };
         // SAFETY:
-        // - ptr is properly aligned, non-null with correct provenance, because it's
-        //   derived from bucket_ptr which is itself aligned as it was allocated from a
-        //   boxed slice of Ts,
-        // - ptr is valid for reads: the only write at the given index has happened
-        //   before this read as promised by the caller.
+        // - ptr is properly aligned, non-null with correct provenance, because
+        //   it's derived from bucket_ptr which is itself aligned as it was
+        //   allocated from a boxed slice of Ts,
+        // - ptr is valid for reads: the only write at the given index has
+        //   happened before this read as promised by the caller.
         unsafe { &*ptr }
     }
 
@@ -586,7 +589,8 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// Internal function to retrieve the pointer to the given bucket,
     /// allocating it if it's null.
     fn get_bucket_ptr(&self, bucket: usize, _guard: &MutexGuard<()>) -> *mut T {
-        // SAFETY: The caller passed a mutex guard, which confirms exclusive access.
+        // SAFETY: The caller passed a mutex guard, which confirms exclusive
+        // access.
         unsafe { self.get_bucket_ptr_raw(bucket) }
     }
 
@@ -791,13 +795,14 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         // SAFETY:
         // - The iterator length is trusted to be correct,
-        // - bucket_pointer is non-null, properly aligned and points to an allocated
-        //   bucket, as ensured by get_bucket_ptr(),
-        // - items starting at bucket_index within this bucket are not yet initialized,
-        //   as ensured by prepare_contiguous_slice(),
-        // - no concurrent writes happen on this AppendVec, as the write lock is held,
-        // - no concurrent reads happen beyond bucket_index on this bucket, as the
-        //   length is only updated below, using a Release ordering.
+        // - bucket_pointer is non-null, properly aligned and points to an
+        //   allocated bucket, as ensured by get_bucket_ptr(),
+        // - items starting at bucket_index within this bucket are not yet
+        //   initialized, as ensured by prepare_contiguous_slice(),
+        // - no concurrent writes happen on this AppendVec, as the write lock is
+        //   held,
+        // - no concurrent reads happen beyond bucket_index on this bucket, as
+        //   the length is only updated below, using a Release ordering.
         unsafe { self.move_iterator(bucket_ptr, bucket_index, iter) };
         self.len.store(index + iter_len, Ordering::Release);
 
@@ -837,12 +842,12 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         // SAFETY:
         // - The iterator length is trusted to be correct,
-        // - bucket_pointer is non-null, properly aligned and points to an allocated
-        //   bucket, as ensured by get_bucket_ptr_mut(),
-        // - items starting at bucket_index within this bucket are not yet initialized,
-        //   as ensured by prepare_contiguous_slice_mut(),
-        // - no concurrent reads nor writes happen on this AppendVec, as this function
-        //   holds an exclusive reference to it.
+        // - bucket_pointer is non-null, properly aligned and points to an
+        //   allocated bucket, as ensured by get_bucket_ptr_mut(),
+        // - items starting at bucket_index within this bucket are not yet
+        //   initialized, as ensured by prepare_contiguous_slice_mut(),
+        // - no concurrent reads nor writes happen on this AppendVec, as this
+        //   function holds an exclusive reference to it.
         unsafe { self.move_iterator(bucket_ptr, bucket_index, iter) };
         self.len.store(index + iter_len, Ordering::Release);
 
@@ -870,20 +875,22 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     ) {
         for (i, item) in iter.enumerate() {
             // SAFETY:
-            // - the entire range between bucket_ptr and ptr is derived from one allocation
-            //   of bucket_len(bucket) items, as 0 <= bucket_index + slice.len() <=
-            //   bucket_len(bucket).
-            // - (bucket_index + i) * size_of::<T>() fits in an isize, as promised by the
-            //   bucketize() function, with an input index <= Self::MAX_LEN,
+            // - the entire range between bucket_ptr and ptr is derived from one
+            //   allocation of bucket_len(bucket) items, as 0 <= bucket_index +
+            //   slice.len() <= bucket_len(bucket).
+            // - (bucket_index + i) * size_of::<T>() fits in an isize, as
+            //   promised by the bucketize() function, with an input index <=
+            //   Self::MAX_LEN,
             let ptr = unsafe { bucket_ptr.add(bucket_index + i) };
 
             // SAFETY:
-            // - ptr is properly aligned, non-null with correct provenance, because it's
-            //   derived from bucket_ptr which is itself aligned as it was allocated from a
-            //   boxed slice of Ts,
-            // - ptr points to a non-initialized memory slot, as it is beyond bucket_index,
-            // - ptr is valid for exclusive writes, as no concurrent reads or writes happen
-            //   beyond bucket_index.
+            // - ptr is properly aligned, non-null with correct provenance,
+            //   because it's derived from bucket_ptr which is itself aligned as
+            //   it was allocated from a boxed slice of Ts,
+            // - ptr points to a non-initialized memory slot, as it is beyond
+            //   bucket_index,
+            // - ptr is valid for exclusive writes, as no concurrent reads or
+            //   writes happen beyond bucket_index.
             unsafe { std::ptr::write(ptr, item) };
         }
     }
@@ -910,17 +917,18 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
             let bucket_ptr = self.get_bucket_ptr_mut(bucket);
             for i in bucket_index..bucket_len {
                 // SAFETY:
-                // - i * size_of::<T>() fits in an isize, as promised by the bucket_len()
-                //   function, with an input index <= Self::MAX_LEN,
-                // - the entire range between bucket_ptr and ptr is derived from one allocation
-                //   of bucket_len items, as 0 <= i < bucket_len.
+                // - i * size_of::<T>() fits in an isize, as promised by the
+                //   bucket_len() function, with an input index <=
+                //   Self::MAX_LEN,
+                // - the entire range between bucket_ptr and ptr is derived from
+                //   one allocation of bucket_len items, as 0 <= i < bucket_len.
                 let ptr = unsafe { bucket_ptr.add(i) };
                 // SAFETY:
-                // - ptr is properly aligned, non-null with correct provenance, because it's
-                //   derived from bucket_ptr which is itself aligned as it was allocated from a
-                //   boxed slice of Ts,
-                // - ptr is valid for exclusive writes as this function takes an exclusive `&mut
-                //   self` parameter.
+                // - ptr is properly aligned, non-null with correct provenance,
+                //   because it's derived from bucket_ptr which is itself
+                //   aligned as it was allocated from a boxed slice of Ts,
+                // - ptr is valid for exclusive writes as this function takes an
+                //   exclusive `&mut self` parameter.
                 unsafe { std::ptr::write(ptr, T::default()) };
             }
 
@@ -958,20 +966,23 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
             let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
             for i in bucket_index..bucket_len {
                 // SAFETY:
-                // - i * size_of::<T>() fits in an isize, as promised by the bucket_len()
-                //   function, with an input index <= Self::MAX_LEN,
-                // - the entire range between bucket_ptr and ptr is derived from one allocation
-                //   of bucket_len items, as 0 <= i < bucket_len.
+                // - i * size_of::<T>() fits in an isize, as promised by the
+                //   bucket_len() function, with an input index <=
+                //   Self::MAX_LEN,
+                // - the entire range between bucket_ptr and ptr is derived from
+                //   one allocation of bucket_len items, as 0 <= i < bucket_len.
                 let ptr = unsafe { bucket_ptr.add(i) };
                 // SAFETY:
-                // - ptr is properly aligned, non-null with correct provenance, because it's
-                //   derived from bucket_ptr which is itself aligned as it was allocated from a
-                //   boxed slice of Ts,
+                // - ptr is properly aligned, non-null with correct provenance,
+                //   because it's derived from bucket_ptr which is itself
+                //   aligned as it was allocated from a boxed slice of Ts,
                 // - ptr is valid for exclusive writes:
-                //   - the Release store on the length just below ensures that no other thread
-                //     is reading the value at the given index (via safe APIs),
-                //   - the write lock ensures that no other thread is ever obtaining the same
-                //     index, i.e. no other thread is ever writing to this index.
+                //   - the Release store on the length just below ensures that
+                //     no other thread is reading the value at the given index
+                //     (via safe APIs),
+                //   - the write lock ensures that no other thread is ever
+                //     obtaining the same index, i.e. no other thread is ever
+                //     writing to this index.
                 unsafe { std::ptr::write(ptr, T::default()) };
             }
 
@@ -1028,13 +1039,14 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
 
         // SAFETY:
-        // - bucket_pointer is non-null, properly aligned and points to an allocated
-        //   bucket, as ensured by get_bucket_ptr(),
-        // - items starting at bucket_index within this bucket are not yet initialized,
-        //   as ensured by prepare_contiguous_slice(),
-        // - no concurrent writes happen on this AppendVec, as the write lock is held,
-        // - no concurrent reads happen beyond bucket_index on this bucket, as the
-        //   length is only updated below, using a Release ordering.
+        // - bucket_pointer is non-null, properly aligned and points to an
+        //   allocated bucket, as ensured by get_bucket_ptr(),
+        // - items starting at bucket_index within this bucket are not yet
+        //   initialized, as ensured by prepare_contiguous_slice(),
+        // - no concurrent writes happen on this AppendVec, as the write lock is
+        //   held,
+        // - no concurrent reads happen beyond bucket_index on this bucket, as
+        //   the length is only updated below, using a Release ordering.
         unsafe { self.clone_slice(bucket_ptr, bucket_index, slice) };
         self.len.store(index + slice.len(), Ordering::Release);
 
@@ -1087,12 +1099,12 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let bucket_ptr = self.get_bucket_ptr_mut(bucket);
 
         // SAFETY:
-        // - bucket_pointer is non-null, properly aligned and points to an allocated
-        //   bucket, as ensured by get_bucket_ptr_mut(),
-        // - items starting at bucket_index within this bucket are not yet initialized,
-        //   as ensured by prepare_contiguous_slice_mut(),
-        // - no concurrent reads nor writes happen on this AppendVec, as this function
-        //   holds an exclusive reference to it.
+        // - bucket_pointer is non-null, properly aligned and points to an
+        //   allocated bucket, as ensured by get_bucket_ptr_mut(),
+        // - items starting at bucket_index within this bucket are not yet
+        //   initialized, as ensured by prepare_contiguous_slice_mut(),
+        // - no concurrent reads nor writes happen on this AppendVec, as this
+        //   function holds an exclusive reference to it.
         unsafe { self.clone_slice(bucket_ptr, bucket_index, slice) };
         self.len.store(index + slice.len(), Ordering::Release);
 
@@ -1114,21 +1126,23 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     unsafe fn clone_slice(&self, bucket_ptr: *mut T, bucket_index: usize, slice: &[T]) {
         for (i, item) in slice.iter().enumerate() {
             // SAFETY:
-            // - the entire range between bucket_ptr and ptr is derived from one allocation
-            //   of bucket_len(bucket) items, as 0 <= bucket_index + slice.len() <=
-            //   bucket_len(bucket).
-            // - (bucket_index + i) * size_of::<T>() fits in an isize, as promised by the
-            //   bucketize() function, with an input index <= Self::MAX_LEN,
+            // - the entire range between bucket_ptr and ptr is derived from one
+            //   allocation of bucket_len(bucket) items, as 0 <= bucket_index +
+            //   slice.len() <= bucket_len(bucket).
+            // - (bucket_index + i) * size_of::<T>() fits in an isize, as
+            //   promised by the bucketize() function, with an input index <=
+            //   Self::MAX_LEN,
             let ptr = unsafe { bucket_ptr.add(bucket_index + i) };
 
             let item: T = item.clone();
             // SAFETY:
-            // - ptr is properly aligned, non-null with correct provenance, because it's
-            //   derived from bucket_ptr which is itself aligned as it was allocated from a
-            //   boxed slice of Ts,
-            // - ptr points to a non-initialized memory slot, as it is beyond bucket_index,
-            // - ptr is valid for exclusive writes, as no concurrent reads or writes happen
-            //   beyond bucket_index.
+            // - ptr is properly aligned, non-null with correct provenance,
+            //   because it's derived from bucket_ptr which is itself aligned as
+            //   it was allocated from a boxed slice of Ts,
+            // - ptr points to a non-initialized memory slot, as it is beyond
+            //   bucket_index,
+            // - ptr is valid for exclusive writes, as no concurrent reads or
+            //   writes happen beyond bucket_index.
             unsafe { std::ptr::write(ptr, item) };
         }
     }
@@ -1179,13 +1193,14 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let bucket_ptr = self.get_bucket_ptr(bucket, &guard);
 
         // SAFETY:
-        // - bucket_pointer is non-null, properly aligned and points to an allocated
-        //   bucket, as ensured by get_bucket_ptr(),
-        // - items starting at bucket_index within this bucket are not yet initialized,
-        //   as ensured by prepare_contiguous_slice(),
-        // - no concurrent writes happen on this AppendVec, as the write lock is held,
-        // - no concurrent reads happen beyond bucket_index on this bucket, as the
-        //   length is only updated below, using a Release ordering.
+        // - bucket_pointer is non-null, properly aligned and points to an
+        //   allocated bucket, as ensured by get_bucket_ptr(),
+        // - items starting at bucket_index within this bucket are not yet
+        //   initialized, as ensured by prepare_contiguous_slice(),
+        // - no concurrent writes happen on this AppendVec, as the write lock is
+        //   held,
+        // - no concurrent reads happen beyond bucket_index on this bucket, as
+        //   the length is only updated below, using a Release ordering.
         unsafe { self.copy_slice(bucket_ptr, bucket_index, slice) };
         self.len.store(index + slice.len(), Ordering::Release);
 
@@ -1237,12 +1252,12 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let bucket_ptr = self.get_bucket_ptr_mut(bucket);
 
         // SAFETY:
-        // - bucket_pointer is non-null, properly aligned and points to an allocated
-        //   bucket, as ensured by get_bucket_ptr_mut(),
-        // - items starting at bucket_index within this bucket are not yet initialized,
-        //   as ensured by prepare_contiguous_slice_mut(),
-        // - no concurrent reads nor writes happen on this AppendVec, as this function
-        //   holds an exclusive reference to it.
+        // - bucket_pointer is non-null, properly aligned and points to an
+        //   allocated bucket, as ensured by get_bucket_ptr_mut(),
+        // - items starting at bucket_index within this bucket are not yet
+        //   initialized, as ensured by prepare_contiguous_slice_mut(),
+        // - no concurrent reads nor writes happen on this AppendVec, as this
+        //   function holds an exclusive reference to it.
         unsafe { self.copy_slice(bucket_ptr, bucket_index, slice) };
         self.len.store(index + slice.len(), Ordering::Release);
 
@@ -1265,18 +1280,20 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         // SAFETY:
         // - bucket_index * size_of::<T>() fits in an isize, as promised by the
         //   bucketize() function, with an input index <= Self::MAX_LEN,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
         let ptr = unsafe { bucket_ptr.add(bucket_index) };
         // SAFETY:
         // - slice.as_ptr() is valid for reading slice.len() items of type T,
-        // - ptr is valid for writing slice.len() items of type T, indeed bucket_index +
-        //   slice.len() <= bucket_len(bucket),
-        // - slice.as_ptr() is properly aligned, as it directly derives from a slice,
-        // - ptr is properly aligned, as it derives from bucket_ptr which is properly
-        //   aligned,
-        // - the memory regions don't overlap, as the input slice is passed as an
-        //   external const reference parameter,
+        // - ptr is valid for writing slice.len() items of type T, indeed
+        //   bucket_index + slice.len() <= bucket_len(bucket),
+        // - slice.as_ptr() is properly aligned, as it directly derives from a
+        //   slice,
+        // - ptr is properly aligned, as it derives from bucket_ptr which is
+        //   properly aligned,
+        // - the memory regions don't overlap, as the input slice is passed as
+        //   an external const reference parameter,
         // - T is Copy.
         unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
     }
@@ -1306,26 +1323,28 @@ impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
             let slice: *mut [T] = std::ptr::slice_from_raw_parts_mut(ptr, bucket_items);
             // SAFETY:
             // - slice starts at the aligned and non-null ptr,
-            // - slice is valid for reads, as all items until len have been written to
-            //   before, as ensured by the Acquire load on self.len,
-            // - slice is valid for writes, as this function takes an exclusive `&mut self`
-            //   parameter,
-            // - slice is valid for dropping, as it is a part of the leaked boxed slice of
-            //   this bucket,
-            // - nothing else is accessing the `slice` while `drop_in_place` is executing,
-            //   as this function takes an exclusive `&mut self` parameter.
+            // - slice is valid for reads, as all items until len have been
+            //   written to before, as ensured by the Acquire load on self.len,
+            // - slice is valid for writes, as this function takes an exclusive
+            //   `&mut self` parameter,
+            // - slice is valid for dropping, as it is a part of the leaked
+            //   boxed slice of this bucket,
+            // - nothing else is accessing the `slice` while `drop_in_place` is
+            //   executing, as this function takes an exclusive `&mut self`
+            //   parameter.
             unsafe { std::ptr::drop_in_place(slice) };
 
             // SAFETY:
-            // - ptr has been allocated with the global allocator, as it is derived from a
-            //   leaked boxed slice,
-            // - T has the same alignement as what ptr was allocated with, because ptr
-            //   derives from a boxed slice of Ts,
+            // - ptr has been allocated with the global allocator, as it is
+            //   derived from a leaked boxed slice,
+            // - T has the same alignement as what ptr was allocated with,
+            //   because ptr derives from a boxed slice of Ts,
             // - ptr was allocated with T * bucket_len bytes,
-            // - the length is zero, therefore lower than or equal to the capacity,
+            // - the length is zero, therefore lower than or equal to the
+            //   capacity,
             // - the first 0 values are properly initialized values of type T,
-            // - the allocated size in bytes isn't larger than isize::MAX, because that's
-            //   derived from a leaked boxed slice.
+            // - the allocated size in bytes isn't larger than isize::MAX,
+            //   because that's derived from a leaked boxed slice.
             let vec: Vec<T> = unsafe { Vec::from_raw_parts(ptr, 0, bucket_len) };
             drop(vec);
         }
@@ -1351,22 +1370,23 @@ impl<T, const SLOTS: usize> Index<usize> for AppendVec<T, SLOTS> {
         debug_assert_ne!(bucket_ptr, std::ptr::null());
 
         // SAFETY:
-        // - the assertion at the beginning of this function, with the Acquire load on
-        //   the length, ensures that an item was added at the given index before the
-        //   rest of this function is executed,
-        // - bucket_index * size_of::<T>() fits in an isize, as the checks within push()
-        //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
-        //   this collection,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        // - the assertion at the beginning of this function, with the Acquire
+        //   load on the length, ensures that an item was added at the given
+        //   index before the rest of this function is executed,
+        // - bucket_index * size_of::<T>() fits in an isize, as the checks
+        //   within push() and its variants ensure that at most Self::MAX_LEN +
+        //   1 items are stored in this collection,
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
         let ptr = unsafe { bucket_ptr.add(bucket_index) };
         // SAFETY:
-        // - ptr is properly aligned, non-null with correct provenance, because it's
-        //   derived from bucket_ptr which is itself aligned as it was allocated from a
-        //   boxed slice of Ts,
-        // - ptr is valid for reads: the only write at the given index has happened
-        //   before this read as ensured by the assertion with an Acquire load on the
-        //   length at the beginning of this function.
+        // - ptr is properly aligned, non-null with correct provenance, because
+        //   it's derived from bucket_ptr which is itself aligned as it was
+        //   allocated from a boxed slice of Ts,
+        // - ptr is valid for reads: the only write at the given index has
+        //   happened before this read as ensured by the assertion with an
+        //   Acquire load on the length at the beginning of this function.
         unsafe { &*ptr }
     }
 }
@@ -1402,29 +1422,33 @@ impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
         debug_assert_ne!(bucket_ptr, std::ptr::null());
 
         // SAFETY:
-        // - the assertion comparing `index.end` with `self.len`, with the Acquire load
-        //   on the length, ensures that items were added until the given index before
-        //   the rest of this function is executed,
-        // - bucket_index * size_of::<T>() fits in an isize, as the checks within push()
-        //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
-        //   this collection,
-        // - the entire range between bucket_ptr and ptr is derived from one allocation
-        //   of bucket_len(bucket) items, as 0 <= bucket_index < bucket_len(bucket).
+        // - the assertion comparing `index.end` with `self.len`, with the
+        //   Acquire load on the length, ensures that items were added until the
+        //   given index before the rest of this function is executed,
+        // - bucket_index * size_of::<T>() fits in an isize, as the checks
+        //   within push() and its variants ensure that at most Self::MAX_LEN +
+        //   1 items are stored in this collection,
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
         let ptr = unsafe { bucket_ptr.add(bucket_index) };
         // SAFETY:
-        // - ptr is non-null, as this collection has an invariant that all buckets until
-        //   the length are non null, futher confirmed by a debug assertion,
+        // - ptr is non-null, as this collection has an invariant that all
+        //   buckets until the length are non null, futher confirmed by a debug
+        //   assertion,
         //   - note that the index range isn't empty in this code branch,
         // - ptr is aligned as it derives from the aligned bucket_ptr,
-        // - ptr is valid for reads of index_len items of type T, as confirmed by the
-        //   assertion that bucket_index + index_len <= bucket_len(bucket),
-        // - ptr points to index_len initialized values of type T, as the collection
-        //   maintains the invariant that all items until `self.len` are initialized,
-        // - the memory isn't mutated for the whole output lifetime, which is bound by
-        //   the lifetime of this collection,
-        // - index_len * size_of::<T>() fits in an isize, as the checks within push()
-        //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
-        //   this collection.
+        // - ptr is valid for reads of index_len items of type T, as confirmed
+        //   by the assertion that bucket_index + index_len <=
+        //   bucket_len(bucket),
+        // - ptr points to index_len initialized values of type T, as the
+        //   collection maintains the invariant that all items until `self.len`
+        //   are initialized,
+        // - the memory isn't mutated for the whole output lifetime, which is
+        //   bound by the lifetime of this collection,
+        // - index_len * size_of::<T>() fits in an isize, as the checks within
+        //   push() and its variants ensure that at most Self::MAX_LEN + 1 items
+        //   are stored in this collection.
         unsafe { std::slice::from_raw_parts(ptr, index_len) }
     }
 }
@@ -1468,22 +1492,23 @@ impl<'a, T, const SLOTS: usize> Iterator for AppendVecIter<'a, T, SLOTS> {
             }
 
             // SAFETY:
-            // - the Acquire load in iter() ensures that all indices before self.len,
-            //   including self.index, have been pushed before the iterator was created,
-            // - bucket_index * size_of::<T>() fits in an isize, as the checks within push()
-            //   and push_mut() ensure that at most Self::MAX_LEN + 1 items are stored in
-            //   this collection,
-            // - the entire range between self.bucket_ptr and ptr is derived from one
-            //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
-            //   bucket_len(bucket).
+            // - the Acquire load in iter() ensures that all indices before
+            //   self.len, including self.index, have been pushed before the
+            //   iterator was created,
+            // - bucket_index * size_of::<T>() fits in an isize, as the checks
+            //   within push() and push_mut() ensure that at most Self::MAX_LEN
+            //   + 1 items are stored in this collection,
+            // - the entire range between self.bucket_ptr and ptr is derived
+            //   from one allocation of bucket_len(bucket) items, as 0 <=
+            //   bucket_index < bucket_len(bucket).
             let ptr = unsafe { self.bucket_ptr.add(bucket_index) };
             // SAFETY:
-            // - ptr is properly aligned, non-null with correct provenance, because it's
-            //   derived from self.bucket_ptr which is itself aligned as it was allocated
-            //   from a boxed slice of Ts,
-            // - ptr is valid for reads: the only write at the given index has happened
-            //   before this read as ensured by the assertion with an Acquire load on the
-            //   length in iter().
+            // - ptr is properly aligned, non-null with correct provenance,
+            //   because it's derived from self.bucket_ptr which is itself
+            //   aligned as it was allocated from a boxed slice of Ts,
+            // - ptr is valid for reads: the only write at the given index has
+            //   happened before this read as ensured by the assertion with an
+            //   Acquire load on the length in iter().
             unsafe { Some(&*ptr) }
         }
     }
@@ -1549,19 +1574,20 @@ impl<'a, T, const SLOTS: usize> Iterator for AppendVecChunksIter<'a, T, SLOTS> {
             };
 
             // SAFETY:
-            // - bucket_ptr is non-null, as this collection has an invariant that all
-            //   buckets until the length are non null, futher confirmed by a debug
-            //   assertion,
-            // - bucket_ptr is aligned as it derives from an allocation of type [T],
+            // - bucket_ptr is non-null, as this collection has an invariant
+            //   that all buckets until the length are non null, futher
+            //   confirmed by a debug assertion,
+            // - bucket_ptr is aligned as it derives from an allocation of type
+            //   [T],
             // - bucket_ptr is valid for reads of bucket_items items of type T,
-            // - bucket_ptr points to bucket_items initialized values of type T, as the
-            //   AppendVec maintains the invariant that all items until its length are
-            //   initialized,
-            // - the memory isn't mutated for the whole output lifetime, which is bound by
-            //   the lifetime of the underlying AppendVec,
-            // - bucket_items * size_of::<T>() fits in an isize, as the checks within push()
-            //   and its variants ensure that at most Self::MAX_LEN + 1 items are stored in
-            //   an AppendVec.
+            // - bucket_ptr points to bucket_items initialized values of type T,
+            //   as the AppendVec maintains the invariant that all items until
+            //   its length are initialized,
+            // - the memory isn't mutated for the whole output lifetime, which
+            //   is bound by the lifetime of the underlying AppendVec,
+            // - bucket_items * size_of::<T>() fits in an isize, as the checks
+            //   within push() and its variants ensure that at most
+            //   Self::MAX_LEN + 1 items are stored in an AppendVec.
             unsafe { Some(std::slice::from_raw_parts(bucket_ptr, bucket_items)) }
         }
     }

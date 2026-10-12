@@ -234,30 +234,32 @@ impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
         };
 
         // SAFETY:
-        // - bucket_ptr is non-null, as this collection has an invariant that all
-        //   buckets until the length are non null, futher confirmed by a debug
-        //   assertion,
+        // - bucket_ptr is non-null, as this collection has an invariant that
+        //   all buckets until the length are non null, futher confirmed by a
+        //   debug assertion,
         //   - note that the index range isn't empty in this code branch,
         // - bucket_ptr is aligned as u8 has an alignment of 1,
-        // - bucket_ptr is valid for reads of bucket_available_len items of type u8, as
-        //   the length is the length of the bucket, clamped to the current length if it
-        //   is the last bucket,
-        // - bucket_ptr points to bucket_available_len initialized values of type u8, as
-        //   the collection maintains the invariant that all items until `self.len` are
-        //   initialized,
-        // - the memory isn't mutated for the whole output lifetime, which is bound by
-        //   the lifetime of this collection,
-        // - index_len * size_of::<u8>() fits in an isize, as the checks within push()
-        //   and its variants ensure that at most AppendVec::MAX_LEN + 1 items are
-        //   stored in this collection.
+        // - bucket_ptr is valid for reads of bucket_available_len items of type
+        //   u8, as the length is the length of the bucket, clamped to the
+        //   current length if it is the last bucket,
+        // - bucket_ptr points to bucket_available_len initialized values of
+        //   type u8, as the collection maintains the invariant that all items
+        //   until `self.len` are initialized,
+        // - the memory isn't mutated for the whole output lifetime, which is
+        //   bound by the lifetime of this collection,
+        // - index_len * size_of::<u8>() fits in an isize, as the checks within
+        //   push() and its variants ensure that at most AppendVec::MAX_LEN + 1
+        //   items are stored in this collection.
         let bucket_slice: &[u8] =
             unsafe { std::slice::from_raw_parts(bucket_ptr, bucket_available_len) };
         // SAFETY:
-        // - the collection maintains the invariant that all full buckets are valid
-        //   UTF-8, as they are the concatenation of valid UTF-8 strings (pushed via the
-        //   public API) followed by padding of zeros (which is also valid UTF-8),
-        // - likewise, the last bucket is valid UTF-8 until the collection length, as it
-        //   is the concatenation of valid UTF-8 strings that have been pushed.
+        // - the collection maintains the invariant that all full buckets are
+        //   valid UTF-8, as they are the concatenation of valid UTF-8 strings
+        //   (pushed via the public API) followed by padding of zeros (which is
+        //   also valid UTF-8),
+        // - likewise, the last bucket is valid UTF-8 until the collection
+        //   length, as it is the concatenation of valid UTF-8 strings that have
+        //   been pushed.
         let bucket_str: &str = unsafe { std::str::from_utf8_unchecked(bucket_slice) };
 
         &bucket_str[bucket_index..bucket_index + index_len]
