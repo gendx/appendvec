@@ -138,7 +138,8 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if the capacity exceeds the maximum allocation size
-    /// for a collection of items of type `T`.
+    /// for a collection of items of type `T`. Use
+    /// [`try_with_capacity`](Self::try_with_capacity) for a fallible API.
     ///
     /// ```
     /// # use appendvec::AppendVec;
@@ -149,14 +150,46 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
+        match Self::try_with_capacity(capacity) {
+            Some(x) => x,
+            None => panic!(
+                "AppendVec: requested capacity is too large for the given type ({capacity}, {})",
+                Self::MAX_LEN
+            ),
+        }
+    }
+
+    /// Attempts to create a new, empty collection, pre-allocating space for at
+    /// least `capacity` items.
+    ///
+    /// The requested `capacity` items are guaranteed to be allocated
+    /// contiguously in a single bucket.
+    ///
+    /// This returns [`None`] if the capacity exceeds the maximum allocation
+    /// size for a collection of items of type `T`.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// // An AppendVec with 5 slots can only contain up to 2^5 = 32 bytes.
+    /// assert!(AppendVec::<u8, 5>::try_with_capacity(33).is_none());
+    ///
+    /// let mut container: AppendVec<u8, 5> = AppendVec::try_with_capacity(32).unwrap();
+    /// for i in 0..32 {
+    ///     let index = container.push_mut(i);
+    ///     assert_eq!(container[index], i);
+    /// }
+    /// assert!(container.try_push_mut(33, usize::MAX).is_none());
+    ///
+    /// assert_eq!(&container[0..5], &[0, 1, 2, 3, 4]);
+    /// ```
+    pub fn try_with_capacity(capacity: usize) -> Option<Self> {
         const {
             assert!(SLOTS as u32 <= usize::BITS);
+            assert!(Self::MAX_LEN < usize::MAX);
         }
-        assert!(
-            capacity <= Self::MAX_LEN,
-            "AppendVec: requested capacity is too large for the given type ({capacity}, {})",
-            Self::MAX_LEN
-        );
+        if capacity > Self::MAX_LEN + 1 {
+            return None;
+        }
 
         let mut buckets = [std::ptr::null_mut(); SLOTS];
         let bucket_offset = if capacity == 0 {
@@ -173,12 +206,12 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
             bucket_offset
         };
 
-        Self {
+        Some(Self {
             len: CachePadded::new(AtomicUsize::new(0)),
             bucket_offset,
             buckets: buckets.map(AtomicPtr::new),
             write_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Returns the length of this collection.
@@ -405,7 +438,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         let guard = self.write_lock.lock().unwrap();
 
         let index = self.len.load(Ordering::Relaxed);
-        if index == Self::MAX_LEN || index > limit {
+        if index > Self::MAX_LEN || index > limit {
             return None;
         }
 
@@ -458,7 +491,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// ```
     pub fn try_push_mut(&mut self, t: T, limit: usize) -> Option<usize> {
         let index = *self.len.get_mut();
-        if index == Self::MAX_LEN || index > limit {
+        if index > Self::MAX_LEN || index > limit {
             return None;
         }
 
@@ -1370,7 +1403,7 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// the given limit.
     fn check_slice_limit(&self, mut index: usize, slice_len: usize, limit: usize) -> bool {
         if slice_len > Self::MAX_LEN + 1 - index
-            || slice_len > bucket_len(SLOTS - 1, self.bucket_offset)
+            || slice_len > max_bucket_len(SLOTS, self.bucket_offset)
         {
             return false;
         }
@@ -2705,6 +2738,14 @@ const fn bucket_len(bucket: usize, bucket_offset: u32) -> usize {
         panic!("Invalid bucket between 0 and bucket_offset");
     } else {
         1 << bucket
+    }
+}
+
+const fn max_bucket_len(slots: usize, bucket_offset: u32) -> usize {
+    if bucket_offset as usize == slots {
+        bucket_len(0, bucket_offset)
+    } else {
+        bucket_len(slots - 1, bucket_offset)
     }
 }
 

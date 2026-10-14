@@ -29,6 +29,9 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// Creates a new, empty string, pre-allocating space for at least
     /// `capacity` bytes.
     ///
+    /// The requested `capacity` bytes are guaranteed to be allocated
+    /// contiguously in a single bucket.
+    ///
     /// # Panics
     ///
     /// This function panics if the capacity exceeds the maximum allocation
@@ -48,6 +51,36 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
         Self {
             inner: AppendVec::with_capacity(capacity),
         }
+    }
+
+    /// Attempts to create a new, empty string, pre-allocating space for at
+    /// least `capacity` bytes.
+    ///
+    /// The requested `capacity` bytes are guaranteed to be allocated
+    /// contiguously in a single bucket.
+    ///
+    /// This returns [`None`] if the capacity exceeds the maximum allocation
+    /// size.
+    ///
+    /// ```
+    /// # use appendvec::AppendStr;
+    /// // An AppendStr with 5 slots can only contain up to 2^5 = 32 bytes.
+    /// assert!(AppendStr::<5>::try_with_capacity(33).is_none());
+    ///
+    /// let mut container: AppendStr<5> = AppendStr::try_with_capacity(32).unwrap();
+    /// for i in 0..32 {
+    ///     let bytes = [i];
+    ///     let s = std::str::from_utf8(&bytes).unwrap();
+    ///     let index = container.push_str_mut(s);
+    ///     assert_eq!(&container[index], s);
+    /// }
+    /// assert!(container.try_push_str_mut("A", usize::MAX).is_none());
+    ///
+    /// assert_eq!(&container[0..5], "\x00\x01\x02\x03\x04");
+    /// ```
+    pub fn try_with_capacity(capacity: usize) -> Option<Self> {
+        let inner = AppendVec::try_with_capacity(capacity)?;
+        Some(Self { inner })
     }
 
     /// Returns the length in bytes of this collection.
