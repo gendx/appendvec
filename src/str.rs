@@ -17,8 +17,7 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// Creates a new, empty string.
     ///
     /// ```
-    /// use appendvec::AppendStr;
-    ///
+    /// # use appendvec::AppendStr;
     /// let mut container: AppendStr = AppendStr::new();
     /// let index = container.push_str_mut("Hello world!");
     /// assert_eq!(&container[index], "Hello world!");
@@ -36,8 +35,7 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// size.
     ///
     /// ```
-    /// use appendvec::AppendStr;
-    ///
+    /// # use appendvec::AppendStr;
     /// let mut container: AppendStr = AppendStr::with_capacity(42);
     /// for i in 0..42 {
     ///     let bytes = [i];
@@ -67,7 +65,7 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// operations.
     ///
     /// ```
-    /// use appendvec::AppendStr;
+    /// # use appendvec::AppendStr;
     /// use std::thread;
     ///
     /// let container: AppendStr = AppendStr::with_capacity(42);
@@ -125,11 +123,11 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size.
+    /// allocation size. Use [`try_push_str()`](Self::try_push_str) for a
+    /// fallible API.
     ///
     /// ```
-    /// use appendvec::AppendStr;
-    ///
+    /// # use appendvec::AppendStr;
     /// let container: AppendStr = AppendStr::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
@@ -152,11 +150,11 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size.
+    /// allocation size. Use [`try_push_str_mut()`](Self::try_push_str_mut) for
+    /// a fallible API.
     ///
     /// ```
-    /// use appendvec::AppendStr;
-    ///
+    /// # use appendvec::AppendStr;
     /// let mut container: AppendStr = AppendStr::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
@@ -167,6 +165,59 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// ```
     pub fn push_str_mut(&mut self, s: &str) -> Range<usize> {
         self.inner.push_slice_copy_mut(s.as_bytes())
+    }
+
+    /// Attempts to add the given string to this collection, and returns the
+    /// byte range at which it was added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// The string is guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous string. If the current
+    /// bucket doesn't have enough remaining capacity to accommodate this
+    /// contiguous string, it will be padded with zero bytes (which are valid
+    /// UTF-8).
+    ///
+    /// See also [`try_push_str_mut()`](Self::try_push_str_mut), which is more
+    /// efficient if you hold a mutable reference to this collection.
+    ///
+    /// ```
+    /// # use appendvec::AppendStr;
+    /// let container: AppendStr = AppendStr::new();
+    ///
+    /// let index = container.try_push_str("12345678", 15);
+    /// assert_eq!(index, None);
+    ///
+    /// let index = container.try_push_str("1234567", 15).unwrap();
+    /// assert_eq!(&container[index], "1234567");
+    /// ```
+    pub fn try_push_str(&self, s: &str, limit: usize) -> Option<Range<usize>> {
+        self.inner.try_push_slice_copy(s.as_bytes(), limit)
+    }
+
+    /// Attempts to add the given string to this collection, and returns the
+    /// byte range at which it was added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// Contrary to [`try_push_str()`](Self::try_push_str), no write lock is
+    /// held internally because this function already takes an exclusive
+    /// mutable reference to this collection.
+    ///
+    /// ```
+    /// # use appendvec::AppendStr;
+    /// let mut container: AppendStr = AppendStr::new();
+    ///
+    /// let index = container.try_push_str_mut("12345678", 15);
+    /// assert_eq!(index, None);
+    ///
+    /// let index = container.try_push_str_mut("1234567", 15).unwrap();
+    /// assert_eq!(&container[index], "1234567");
+    /// ```
+    pub fn try_push_str_mut(&mut self, s: &str, limit: usize) -> Option<Range<usize>> {
+        self.inner.try_push_slice_copy_mut(s.as_bytes(), limit)
     }
 
     /// Gets the byte slice at the given index range, without checking that they
@@ -189,8 +240,7 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// Otherwise, this function panics.
     ///
     /// ```
-    /// use appendvec::AppendStr;
-    ///
+    /// # use appendvec::AppendStr;
     /// let container: AppendStr = AppendStr::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
@@ -201,6 +251,43 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// ```
     pub fn get_bytes(&self, index: Range<usize>) -> &[u8] {
         &self.inner[index]
+    }
+
+    /// Attempts to get the byte slice at the given index range, without
+    /// checking that they are valid UTF-8.
+    ///
+    /// Bypassing the UTF-8 check can be useful if you'll only look at bytes
+    /// anyway, for example for string comparison.
+    ///
+    /// This returns [`None`] if the provided `index` range:
+    /// - is larger than the size of the collection,
+    /// - or isn't contained in a single contiguous bucket.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the provided `index` range isn't correctly
+    /// ordered, i.e. if `index.start > index.end`. `index` range isn't
+    /// correctly ordered.
+    ///
+    /// ```
+    /// # use appendvec::AppendStr;
+    /// let container: AppendStr = AppendStr::new();
+    /// for i in 0..5 {
+    ///     let blob = vec![i; i as usize];
+    ///     let s = std::str::from_utf8(blob.as_slice()).unwrap();
+    ///     let index = container.push_str(s);
+    ///     assert_eq!(container.try_get_bytes(index), Some(blob.as_slice()));
+    /// }
+    ///
+    /// assert_eq!(container.try_get_bytes(0..10), None);
+    /// assert_eq!(container.try_get_bytes(0..2).unwrap(), &[1, 0]);
+    /// assert_eq!(container.try_get_bytes(2..4).unwrap(), &[2, 2]);
+    /// assert_eq!(container.try_get_bytes(4..8).unwrap(), &[3, 3, 3, 0]);
+    /// assert_eq!(container.try_get_bytes(8..12).unwrap(), &[4, 4, 4, 4]);
+    /// assert_eq!(container.try_get_bytes(8..13), None);
+    /// ```
+    pub fn try_get_bytes(&self, index: Range<usize>) -> Option<&[u8]> {
+        self.inner.try_index_slice(index)
     }
 
     /// Reduces the size of this collection to the given length.
@@ -226,39 +313,59 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
 
         self.inner.truncate(len);
     }
-}
 
-impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
-    type Output = str;
-
+    /// Attempts to get the string at the given index range.
+    ///
+    /// This returns [`None`] if the provided `index` range:
+    /// - is larger than the size of the collection,
+    /// - isn't contained in a single contiguous bucket,
+    /// - or doesn't fall on UTF-8 boundaries.
+    ///
     /// # Panics
     ///
-    /// The passed `index` range:
-    /// - must be correctly ordered, i.e. `index.start <= index.end`,
-    /// - must be lower than the size of the collection, i.e. a call to
-    ///   [`push_str()`](Self::push_str) (or its variants) that returned a
-    ///   superset of `index` must have happened before this function call,
-    /// - must be contained in a single contiguous bucket; this is always the
-    ///   case when passing a subset of a range returned by a previous call to
-    ///   [`push_str()`](Self::push_str),
-    /// - must be fall on UTF-8 boundaries; this is always the case when exactly
-    ///   passing a range returned by a previous call to
-    ///   [`push_str()`](Self::push_str).
+    /// This function panics if the provided `index` range isn't correctly
+    /// ordered, i.e. if `index.start > index.end`.
     ///
-    /// Otherwise, this function panics.
-    fn index(&self, index: Range<usize>) -> &Self::Output {
+    /// ```
+    /// # use appendvec::AppendStr;
+    /// let container: AppendStr = AppendStr::new();
+    ///
+    /// let index = container.push_str("Amazing");
+    /// let index = container.push_str("Hello world");
+    /// let index = container.push_str("💖");
+    ///
+    /// assert_eq!(container.try_index(8..15), Some("Amazing"));
+    /// assert_eq!(container.try_index(16..27), Some("Hello world"));
+    /// assert_eq!(container.try_index(27..31), Some("💖"));
+    ///
+    /// assert_eq!(container.try_index(8..16), Some("Amazing\0"));
+    /// // Not in a single bucket.
+    /// assert_eq!(container.try_index(8..27), None);
+    /// assert_eq!(container.try_index(16..21), Some("Hello"));
+    /// // Not a UTF-8 boundary.
+    /// assert_eq!(container.try_index(16..28), None);
+    /// assert_eq!(container.try_index(16..31), Some("Hello world💖"));
+    /// // Out of bounds.
+    /// assert_eq!(container.try_index(16..32), None);
+    /// ```
+    pub fn try_index(&self, index: Range<usize>) -> Option<&str> {
         if index.start == index.end {
-            return "";
+            return Some("");
         }
 
         assert!(index.start <= index.end);
         let index_len = index.end - index.start;
 
         let len = self.inner.len.load(Ordering::Acquire);
-        assert!(index.end <= len);
+        if index.end > len {
+            return None;
+        }
+
         let (bucket, bucket_index) = bucketize(index.start, self.inner.bucket_offset);
         let bucket_len = bucket_len(bucket, self.inner.bucket_offset);
-        assert!(index_len <= bucket_len - bucket_index);
+        if index_len > bucket_len - bucket_index {
+            return None;
+        }
 
         let bucket_ptr = self.inner.buckets[bucket].load(Ordering::Relaxed) as *const u8;
         debug_assert_ne!(bucket_ptr, std::ptr::null());
@@ -299,7 +406,33 @@ impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
         //   been pushed.
         let bucket_str: &str = unsafe { std::str::from_utf8_unchecked(bucket_slice) };
 
-        &bucket_str[bucket_index..bucket_index + index_len]
+        bucket_str.get(bucket_index..bucket_index + index_len)
+    }
+}
+
+impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
+    type Output = str;
+
+    /// # Panics
+    ///
+    /// The passed `index` range:
+    /// - must be correctly ordered, i.e. `index.start <= index.end`,
+    /// - must be lower than the size of the collection, i.e. a call to
+    ///   [`push_str()`](Self::push_str) (or its variants) that returned a
+    ///   superset of `index` must have happened before this function call,
+    /// - must be contained in a single contiguous bucket; this is always the
+    ///   case when passing a subset of a range returned by a previous call to
+    ///   [`push_str()`](Self::push_str),
+    /// - must be fall on UTF-8 boundaries; this is always the case when exactly
+    ///   passing a range returned by a previous call to
+    ///   [`push_str()`](Self::push_str).
+    ///
+    /// Otherwise, this function panics.
+    fn index(&self, index: Range<usize>) -> &Self::Output {
+        match self.try_index(index.clone()) {
+            Some(x) => x,
+            None => panic!("Invalid index {index:?} in AppendStr"),
+        }
     }
 }
 
@@ -342,7 +475,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "byte index 2 is not a char boundary; it is inside '⠝' (bytes 0..3")]
+    #[should_panic(expected = "Invalid index 4..6 in AppendStr")]
     fn test_index_non_utf8() {
         let s: AppendStr = AppendStr::new();
         let index = s.push_str("⠝");

@@ -112,8 +112,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// Creates a new, empty collection.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let mut container: AppendVec<_> = AppendVec::new();
     /// let index = container.push_mut(42);
     /// assert_eq!(container[index], 42);
@@ -142,8 +141,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// for a collection of items of type `T`.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let mut container: AppendVec<_> = AppendVec::with_capacity(42);
     /// for i in 0..42 {
     ///     let index = container.push_mut(i);
@@ -198,7 +196,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// operations.
     ///
     /// ```
-    /// use appendvec::AppendVec;
+    /// # use appendvec::AppendVec;
     /// use std::thread;
     ///
     /// let container: AppendVec<_> = AppendVec::with_capacity(42);
@@ -256,7 +254,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// [`len()`](Self::len) function instead.
     ///
     /// ```
-    /// use appendvec::AppendVec;
+    /// # use appendvec::AppendVec;
     /// use std::sync::Barrier;
     /// use std::thread;
     ///
@@ -335,11 +333,11 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push()`](Self::try_push) for a fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// // The container isn't mutable, we'll use concurrent interior mutability via the push()
     /// // function.
     /// let container: AppendVec<_> = AppendVec::with_capacity(42);
@@ -349,13 +347,66 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn push(&self, t: T) -> usize {
+        match self.try_push(t, usize::MAX) {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Adds the given item to this collection and returns the index at
+    /// which it was added.
+    ///
+    /// Contrary to [`push()`](Self::push), no write lock is held internally
+    /// because this function already takes an exclusive mutable reference
+    /// to this collection.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_mut()`](Self::try_push_mut) for a fallible API.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::with_capacity(42);
+    /// for i in 0..42 {
+    ///     let index = container.push_mut(i);
+    ///     assert_eq!(container[index], i);
+    /// }
+    /// ```
+    pub fn push_mut(&mut self, t: T) -> usize {
+        match self.try_push_mut(t, usize::MAX) {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Attempts to add the given item to this collection and return the index
+    /// at which it was added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// index would be greater than the provided `limit`.
+    ///
+    /// See also [`try_push_mut()`](Self::try_push_mut), which is more efficient
+    /// if you hold a mutable reference to this [`AppendVec`] as it avoids
+    /// acquiring a write lock.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..=42 {
+    ///     let index = container.try_push(i, 42);
+    ///     assert_eq!(index, Some(i));
+    /// }
+    /// let index = container.try_push(43, 42);
+    /// assert_eq!(index, None);
+    /// ```
+    pub fn try_push(&self, t: T, limit: usize) -> Option<usize> {
         let guard = self.write_lock.lock().unwrap();
 
         let index = self.len.load(Ordering::Relaxed);
-        if index == Self::MAX_LEN {
-            // Drop the guard before panicking to avoid poisoning the Mutex.
-            drop(guard);
-            panic!("AppendVec is full: cannot push");
+        if index == Self::MAX_LEN || index > limit {
+            return None;
         }
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
@@ -382,33 +433,34 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         drop(guard);
 
-        index
+        Some(index)
     }
 
-    /// Adds the given item to this collection and returns the index at
-    /// which it was added.
+    /// Attempts to add the given item to this collection and return the index
+    /// at which it was added.
     ///
-    /// Contrary to [`push()`](Self::push), no write lock is held internally
-    /// because this function already takes an exclusive mutable reference
-    /// to this collection.
+    /// This returns [`None`] if this collection is full or if the returned
+    /// index would be greater than the provided `limit`.
     ///
-    /// # Panics
-    ///
-    /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// Contrary to [`try_push()`](Self::try_push), no write lock is held
+    /// internally because this function already takes an exclusive mutable
+    /// reference to this collection.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
-    /// let mut container: AppendVec<_> = AppendVec::with_capacity(42);
-    /// for i in 0..42 {
-    ///     let index = container.push_mut(i);
-    ///     assert_eq!(container[index], i);
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..=42 {
+    ///     let index = container.try_push_mut(i, 42);
+    ///     assert_eq!(index, Some(i));
     /// }
+    /// let index = container.try_push_mut(43, 42);
+    /// assert_eq!(index, None);
     /// ```
-    pub fn push_mut(&mut self, t: T) -> usize {
+    pub fn try_push_mut(&mut self, t: T, limit: usize) -> Option<usize> {
         let index = *self.len.get_mut();
-        assert_ne!(index, Self::MAX_LEN, "AppendVec is full: cannot push");
+        if index == Self::MAX_LEN || index > limit {
+            return None;
+        }
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         let bucket_ptr = self.get_bucket_ptr_mut(bucket);
@@ -429,7 +481,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         unsafe { std::ptr::write(ptr, t) };
         *self.len.get_mut() = index + 1;
 
-        index
+        Some(index)
     }
 
     /// Obtain a reference to the item at the given index without performing
@@ -447,7 +499,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// syntax instead.
     ///
     /// ```
-    /// use appendvec::AppendVec;
+    /// # use appendvec::AppendVec;
     /// use std::sync::Barrier;
     /// use std::thread;
     ///
@@ -506,7 +558,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// number of atomic operations.
     ///
     /// ```
-    /// use appendvec::AppendVec;
+    /// # use appendvec::AppendVec;
     /// use std::thread;
     ///
     /// let container: AppendVec<_> = AppendVec::with_capacity(42);
@@ -548,7 +600,7 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// number of atomic operations.
     ///
     /// ```
-    /// use appendvec::AppendVec;
+    /// # use appendvec::AppendVec;
     /// use std::thread;
     ///
     /// let container: AppendVec<_> = AppendVec::new();
@@ -641,11 +693,12 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_owned_slice()`](Self::try_push_owned_slice) for a fallible
+    /// API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let container: AppendVec<String> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![format!("{i}"); i];
@@ -678,11 +731,12 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_owned_slice_mut()`](Self::try_push_owned_slice_mut) for a
+    /// fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let mut container: AppendVec<String> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![format!("{i}"); i];
@@ -715,12 +769,12 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_array()`](Self::try_push_array) for a fallible API.
     ///
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let container: AppendVec<String> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob: [String; 11] = std::array::from_fn(|_| format!("{i}"));
@@ -753,11 +807,11 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_array_mut()`](Self::try_push_array_mut) for a fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let mut container: AppendVec<String> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob: [String; 11] = std::array::from_fn(|_| format!("{i}"));
@@ -784,14 +838,257 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     ///
     /// This function requires the iterator length to be correct. This is akin
     /// to the nightly-only [`TrustedLen`](std::iter::TrustedLen) trait.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_contiguous()`](Self::try_push_contiguous) for a fallible API.
     pub unsafe fn push_contiguous(&self, iter: impl ExactSizeIterator<Item = T>) -> Range<usize> {
+        // SAFETY: This call forwards the promise that the iterator length is
+        // correct.
+        match unsafe { self.try_push_contiguous(iter, usize::MAX) } {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Adds all the items from the given iterator to this collection, and
+    /// returns the range at which they were added.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice.
+    ///
+    /// Contrary to [`push_contiguous()`](Self::push_contiguous), no write lock
+    /// is held internally because this function already takes an exclusive
+    /// mutable reference to this collection.
+    ///
+    /// # Safety
+    ///
+    /// This function requires the iterator length to be correct. This is akin
+    /// to the nightly-only [`TrustedLen`](std::iter::TrustedLen) trait.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if this collection has reached the maximum
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_contiguous_mut()`](Self::try_push_contiguous_mut) for a
+    /// fallible API.
+    pub unsafe fn push_contiguous_mut(
+        &mut self,
+        iter: impl ExactSizeIterator<Item = T>,
+    ) -> Range<usize> {
+        // SAFETY: This call forwards the promise that the iterator length is
+        // correct.
+        match unsafe { self.try_push_contiguous_mut(iter, usize::MAX) } {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Attempts to move the given contiguous slice of items to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`try_push_owned_slice_mut()`](Self::try_push_owned_slice_mut) is more
+    /// efficient as it avoids acquiring a write lock.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`try_push_slice_copy()`](Self::try_push_slice_copy) instead on a
+    /// borrowed slice may be more efficient.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     container.push_owned_slice(blob.clone());
+    /// }
+    ///
+    /// assert_eq!(container.len(), 908);
+    /// let blob = vec![String::from("42"); 42];
+    /// let index = container.try_push_owned_slice(blob.clone(), 949);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_owned_slice(blob.clone(), 950);
+    /// assert_eq!(index, Some(908..950));
+    /// ```
+    pub fn try_push_owned_slice(&self, owned_slice: Vec<T>, limit: usize) -> Option<Range<usize>> {
+        // SAFETY: The length of an iterator on Vec is trusted.
+        unsafe { self.try_push_contiguous(owned_slice.into_iter(), limit) }
+    }
+
+    /// Attempts to move the given contiguous slice of items to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`try_push_owned_slice()`](Self::try_push_owned_slice), no
+    /// write lock is held internally because this function already takes an
+    /// exclusive mutable reference to this collection.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`try_push_slice_copy_mut()`](Self::try_push_slice_copy_mut) instead may
+    /// be more efficient.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     container.push_owned_slice_mut(blob.clone());
+    /// }
+    ///
+    /// assert_eq!(container.len_mut(), 908);
+    /// let blob = vec![String::from("42"); 42];
+    /// let index = container.try_push_owned_slice_mut(blob.clone(), 949);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_owned_slice_mut(blob.clone(), 950);
+    /// assert_eq!(index, Some(908..950));
+    /// ```
+    pub fn try_push_owned_slice_mut(
+        &mut self,
+        owned_slice: Vec<T>,
+        limit: usize,
+    ) -> Option<Range<usize>> {
+        // SAFETY: The length of an iterator on Vec is trusted.
+        unsafe { self.try_push_contiguous_mut(owned_slice.into_iter(), limit) }
+    }
+
+    /// Attempts to move the given array of items to this collection and return
+    /// the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`try_push_array_mut()`](Self::try_push_array_mut) is more efficient as
+    /// it avoids acquiring a write lock.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`try_push_slice_copy()`](Self::try_push_slice_copy) instead on a
+    /// borrowed slice may be more efficient.
+    ///
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob: [String; 11] = std::array::from_fn(|_| format!("{i}"));
+    ///     container.push_array(blob);
+    /// }
+    ///
+    /// assert_eq!(container.len(), 509);
+    /// let blob: [String; 11] = std::array::from_fn(|_| String::from("42"));
+    /// let index = container.try_push_array(blob.clone(), 522);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_array(blob.clone(), 523);
+    /// assert_eq!(index, Some(512..523));
+    /// ```
+    pub fn try_push_array<const N: usize>(
+        &self,
+        array: [T; N],
+        limit: usize,
+    ) -> Option<Range<usize>> {
+        // SAFETY: The length of an array iterator is trusted.
+        unsafe { self.try_push_contiguous(array.into_iter(), limit) }
+    }
+
+    /// Attempts to move the given array of items to this collection and return
+    /// the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`try_push_array()`](Self::try_push_array), no write lock is
+    /// held internally because this function already takes an exclusive
+    /// mutable reference to this collection.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`try_push_slice_copy_mut()`](Self::try_push_slice_copy_mut) instead on
+    /// a borrowed slice may be more efficient.
+    ///
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob: [String; 11] = std::array::from_fn(|_| format!("{i}"));
+    ///     container.push_array_mut(blob);
+    /// }
+    ///
+    /// assert_eq!(container.len_mut(), 509);
+    /// let blob: [String; 11] = std::array::from_fn(|_| String::from("42"));
+    /// let index = container.try_push_array_mut(blob.clone(), 522);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_array_mut(blob.clone(), 523);
+    /// assert_eq!(index, Some(512..523));
+    /// ```
+    pub fn try_push_array_mut<const N: usize>(
+        &mut self,
+        array: [T; N],
+        limit: usize,
+    ) -> Option<Range<usize>> {
+        // SAFETY: The length of an array iterator is trusted.
+        unsafe { self.try_push_contiguous_mut(array.into_iter(), limit) }
+    }
+
+    /// Attempts to add all the items from the given iterator to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`try_push_contiguous_mut()`](Self::try_push_contiguous_mut) is more
+    /// efficient as it avoids acquiring a write lock.
+    ///
+    /// # Safety
+    ///
+    /// This function requires the iterator length to be correct. This is akin
+    /// to the nightly-only [`TrustedLen`](std::iter::TrustedLen) trait.
+    pub unsafe fn try_push_contiguous(
+        &self,
+        iter: impl ExactSizeIterator<Item = T>,
+        limit: usize,
+    ) -> Option<Range<usize>> {
         let iter_len = iter.len();
         if iter_len == 0 {
-            return 0..0;
+            return Some(0..0);
         }
 
         let guard = self.write_lock.lock().unwrap();
-        let (guard, index) = self.prepare_contiguous_slice(iter_len, guard);
+        let (guard, index) = self.try_prepare_contiguous_slice(iter_len, limit, guard)?;
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(iter_len <= bucket_len(bucket, self.bucket_offset) - bucket_index);
@@ -813,33 +1110,37 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         drop(guard);
 
-        index..new_len
+        Some(index..new_len)
     }
 
-    /// Adds all the items from the given iterator to this collection, and
-    /// returns the range at which they were added.
+    /// Attempts to add all the items from the given iterator to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// range would exceed the provided `limit`.
     ///
     /// The items are guaranteed to be pushed contiguously, so that indexing the
     /// result allows to retrieve back a contiguous slice.
     ///
-    /// Contrary to [`push_contiguous()`](Self::push_contiguous), no write lock
-    /// is held internally because this function already takes an exclusive
-    /// mutable reference to this collection.
+    /// Contrary to [`try_push_contiguous()`](Self::try_push_contiguous), no
+    /// write lock is held internally because this function already takes an
+    /// exclusive mutable reference to this collection.
     ///
     /// # Safety
     ///
     /// This function requires the iterator length to be correct. This is akin
     /// to the nightly-only [`TrustedLen`](std::iter::TrustedLen) trait.
-    pub unsafe fn push_contiguous_mut(
+    pub unsafe fn try_push_contiguous_mut(
         &mut self,
         iter: impl ExactSizeIterator<Item = T>,
-    ) -> Range<usize> {
+        limit: usize,
+    ) -> Option<Range<usize>> {
         let iter_len = iter.len();
         if iter_len == 0 {
-            return 0..0;
+            return Some(0..0);
         }
 
-        let index = self.prepare_contiguous_slice_mut(iter_len);
+        let index = self.try_prepare_contiguous_slice_mut(iter_len, limit)?;
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(iter_len <= bucket_len(bucket, self.bucket_offset) - bucket_index);
@@ -857,7 +1158,7 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let new_len = index + iter_len;
         *self.len.get_mut() = new_len;
 
-        index..new_len
+        Some(index..new_len)
     }
 
     /// Moves items from the given iterator into indices starting at
@@ -901,16 +1202,15 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         }
     }
 
-    fn prepare_contiguous_slice_mut(&mut self, slice_len: usize) -> usize {
+    fn try_prepare_contiguous_slice_mut(
+        &mut self,
+        slice_len: usize,
+        limit: usize,
+    ) -> Option<usize> {
         let mut index = *self.len.get_mut();
-        assert!(
-            slice_len <= Self::MAX_LEN + 1 - index,
-            "AppendVec is full: cannot push"
-        );
-        assert!(
-            slice_len <= bucket_len(SLOTS - 1, self.bucket_offset),
-            "AppendVec is full: cannot push"
-        );
+        if !self.check_slice_limit(index, slice_len, limit) {
+            return None;
+        }
 
         loop {
             let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
@@ -941,24 +1241,18 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
             index += bucket_len - bucket_index;
         }
 
-        index
+        Some(index)
     }
 
-    fn prepare_contiguous_slice<'guard>(
+    fn try_prepare_contiguous_slice<'guard>(
         &self,
         slice_len: usize,
+        limit: usize,
         guard: MutexGuard<'guard, ()>,
-    ) -> (MutexGuard<'guard, ()>, usize) {
+    ) -> Option<(MutexGuard<'guard, ()>, usize)> {
         let mut index = self.len.load(Ordering::Relaxed);
-        if slice_len > Self::MAX_LEN + 1 - index {
-            // Drop the guard before panicking to avoid poisoning the Mutex.
-            drop(guard);
-            panic!("AppendVec is full: cannot push");
-        }
-        if slice_len > bucket_len(SLOTS - 1, self.bucket_offset) {
-            // Drop the guard before panicking to avoid poisoning the Mutex.
-            drop(guard);
-            panic!("AppendVec is full: cannot push");
+        if !self.check_slice_limit(index, slice_len, limit) {
+            return None;
         }
 
         loop {
@@ -995,7 +1289,35 @@ impl<T: Default, const SLOTS: usize> AppendVec<T, SLOTS> {
             index += bucket_len - bucket_index;
         }
 
-        (guard, index)
+        Some((guard, index))
+    }
+
+    /// Checks if pushing a slice of the given length starting from the given
+    /// index would fit within the maximal collection size and not exceed
+    /// the given limit.
+    fn check_slice_limit(&self, mut index: usize, slice_len: usize, limit: usize) -> bool {
+        if slice_len > Self::MAX_LEN + 1 - index
+            || slice_len > bucket_len(SLOTS - 1, self.bucket_offset)
+        {
+            return false;
+        }
+        if limit == usize::MAX {
+            return true;
+        }
+        if slice_len > limit {
+            return false;
+        }
+
+        loop {
+            let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+            let bucket_len = bucket_len(bucket, self.bucket_offset);
+            if slice_len <= bucket_len - bucket_index {
+                break;
+            }
+            index += bucket_len - bucket_index;
+        }
+
+        index <= limit - slice_len
     }
 }
 
@@ -1020,11 +1342,11 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_slice()`](Self::try_push_slice) for a fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let container: AppendVec<String> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![format!("{i}"); i];
@@ -1033,12 +1355,54 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn push_slice(&self, slice: &[T]) -> Range<usize> {
+        match self.try_push_slice(slice, usize::MAX) {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Attempts to add the given contiguous slice of items to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// index would be greater than the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`try_push_slice_mut()`](Self::try_push_slice_mut) is more efficient as
+    /// it avoids acquiring a write lock.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`try_push_slice_copy()`](Self::try_push_slice_copy) instead may be more
+    /// efficient.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     container.push_slice(blob.as_slice());
+    /// }
+    ///
+    /// assert_eq!(container.len(), 908);
+    /// let blob = vec![String::from("42"); 42];
+    /// let index = container.try_push_slice(blob.as_slice(), 949);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_slice(blob.as_slice(), 950);
+    /// assert_eq!(index, Some(908..950));
+    /// ```
+    pub fn try_push_slice(&self, slice: &[T], limit: usize) -> Option<Range<usize>> {
         if slice.is_empty() {
-            return 0..0;
+            return Some(0..0);
         }
 
         let guard = self.write_lock.lock().unwrap();
-        let (guard, index) = self.prepare_contiguous_slice(slice.len(), guard);
+        let (guard, index) = self.try_prepare_contiguous_slice(slice.len(), limit, guard)?;
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
@@ -1059,7 +1423,7 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         drop(guard);
 
-        index..new_len
+        Some(index..new_len)
     }
 
     /// Adds the given contiguous slice of items to this collection, and returns
@@ -1082,11 +1446,11 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_slice_mut()`](Self::try_push_slice_mut) for a fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let mut container: AppendVec<String> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![format!("i"); i];
@@ -1095,11 +1459,53 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn push_slice_mut(&mut self, slice: &[T]) -> Range<usize> {
+        match self.try_push_slice_mut(slice, usize::MAX) {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Attempts to add the given contiguous slice of items to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// index would be greater than the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`try_push_slice()`](Self::try_push_slice), no write lock is
+    /// held internally because this function already takes an exclusive
+    /// mutable reference to this collection.
+    ///
+    /// If `T` implements [`Copy`], calling
+    /// [`try_push_slice_copy_mut()`](Self::try_push_slice_copy_mut) instead may
+    /// be more efficient.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<String> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![format!("{i}"); i];
+    ///     container.push_slice_mut(blob.as_slice());
+    /// }
+    ///
+    /// assert_eq!(container.len_mut(), 908);
+    /// let blob = vec![String::from("42"); 42];
+    /// let index = container.try_push_slice_mut(blob.as_slice(), 949);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_slice_mut(blob.as_slice(), 950);
+    /// assert_eq!(index, Some(908..950));
+    /// ```
+    pub fn try_push_slice_mut(&mut self, slice: &[T], limit: usize) -> Option<Range<usize>> {
         if slice.is_empty() {
-            return 0..0;
+            return Some(0..0);
         }
 
-        let index = self.prepare_contiguous_slice_mut(slice.len());
+        let index = self.try_prepare_contiguous_slice_mut(slice.len(), limit)?;
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
@@ -1116,7 +1522,7 @@ impl<T: Clone + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let new_len = index + slice.len();
         *self.len.get_mut() = new_len;
 
-        index..new_len
+        Some(index..new_len)
     }
 
     /// Clones the given slice into indices starting at `bucket_index` in the
@@ -1176,11 +1582,11 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_slice_copy()`](Self::try_push_slice_copy) for a fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let container: AppendVec<_> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
@@ -1189,12 +1595,53 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn push_slice_copy(&self, slice: &[T]) -> Range<usize> {
+        match self.try_push_slice_copy(slice, usize::MAX) {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Attempts to add the given contiguous slice of items to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// index would be greater than the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// If you have a mutable reference to this [`AppendVec`], calling
+    /// [`try_push_slice_copy_mut()`](Self::try_push_slice_copy_mut) is more
+    /// efficient as it avoids acquiring a write lock.
+    ///
+    /// If `T` only implements [`Clone`], you can call
+    /// [`try_push_slice()`](Self::try_push_slice) instead.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![123; i];
+    ///     container.push_slice_copy(blob.as_slice());
+    /// }
+    ///
+    /// assert_eq!(container.len(), 908);
+    /// let blob = vec![456; 42];
+    /// let index = container.try_push_slice_copy(blob.as_slice(), 949);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_slice_copy(blob.as_slice(), 950);
+    /// assert_eq!(index, Some(908..950));
+    /// ```
+    pub fn try_push_slice_copy(&self, slice: &[T], limit: usize) -> Option<Range<usize>> {
         if slice.is_empty() {
-            return 0..0;
+            return Some(0..0);
         }
 
         let guard = self.write_lock.lock().unwrap();
-        let (guard, index) = self.prepare_contiguous_slice(slice.len(), guard);
+        let (guard, index) = self.try_prepare_contiguous_slice(slice.len(), limit, guard)?;
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
@@ -1215,7 +1662,7 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         drop(guard);
 
-        index..new_len
+        Some(index..new_len)
     }
 
     /// Adds the given contiguous slice of items to this collection, and returns
@@ -1237,11 +1684,12 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// # Panics
     ///
     /// This function panics if this collection has reached the maximum
-    /// allocation size for items of type `T`.
+    /// allocation size for items of type `T`. Use
+    /// [`try_push_slice_copy_mut()`](Self::try_push_slice_copy_mut) for a
+    /// fallible API.
     ///
     /// ```
-    /// use appendvec::AppendVec;
-    ///
+    /// # use appendvec::AppendVec;
     /// let mut container: AppendVec<_> = AppendVec::new();
     /// for i in 0..42 {
     ///     let blob = vec![123; i];
@@ -1250,11 +1698,52 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
     /// }
     /// ```
     pub fn push_slice_copy_mut(&mut self, slice: &[T]) -> Range<usize> {
+        match self.try_push_slice_copy_mut(slice, usize::MAX) {
+            Some(x) => x,
+            None => panic!("AppendVec is full: cannot push"),
+        }
+    }
+
+    /// Attempts to add the given contiguous slice of items to this collection
+    /// and return the range at which they were added.
+    ///
+    /// This returns [`None`] if this collection is full or if the returned
+    /// index would be greater than the provided `limit`.
+    ///
+    /// The items are guaranteed to be pushed contiguously, so that indexing the
+    /// result allows to retrieve back a contiguous slice. If the current bucket
+    /// doesn't have enough remaining capacity to accommodate this contiguous
+    /// slice, it will be padded with default items, hence the [`Default`]
+    /// requirement for `T`.
+    ///
+    /// Contrary to [`try_push_slice_copy()`](Self::try_push_slice_copy), no
+    /// write lock is held internally because this function already takes an
+    /// exclusive mutable reference to this collection.
+    ///
+    /// If `T` only implements [`Clone`], you can call
+    /// [`try_push_slice_mut()`](Self::try_push_slice_mut) instead.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let blob = vec![123; i];
+    ///     container.push_slice_copy_mut(blob.as_slice());
+    /// }
+    ///
+    /// assert_eq!(container.len_mut(), 908);
+    /// let blob = vec![456; 42];
+    /// let index = container.try_push_slice_copy_mut(blob.as_slice(), 949);
+    /// assert_eq!(index, None);
+    /// let index = container.try_push_slice_copy_mut(blob.as_slice(), 950);
+    /// assert_eq!(index, Some(908..950));
+    /// ```
+    pub fn try_push_slice_copy_mut(&mut self, slice: &[T], limit: usize) -> Option<Range<usize>> {
         if slice.is_empty() {
-            return 0..0;
+            return Some(0..0);
         }
 
-        let index = self.prepare_contiguous_slice_mut(slice.len());
+        let index = self.try_prepare_contiguous_slice_mut(slice.len(), limit)?;
 
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
         debug_assert!(slice.len() <= bucket_len(bucket, self.bucket_offset) - bucket_index);
@@ -1271,7 +1760,7 @@ impl<T: Copy + Default, const SLOTS: usize> AppendVec<T, SLOTS> {
         let new_len = index + slice.len();
         *self.len.get_mut() = new_len;
 
-        index..new_len
+        Some(index..new_len)
     }
 
     /// Copies the given slice into indices starting at `bucket_index` in the
@@ -1444,28 +1933,27 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
 
         *self.len.get_mut() = 0;
     }
-}
 
-impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
-    fn drop(&mut self) {
-        let len = *self.len.get_mut();
-        self.clear(len);
-    }
-}
-
-impl<T, const SLOTS: usize> Index<usize> for AppendVec<T, SLOTS> {
-    type Output = T;
-
-    /// Obtain a reference to the item at the given index.
+    /// Attempts to obtain a reference to the item at the given index.
     ///
-    /// # Panics
+    /// This returns [`None`] if the provided `index` is larger than the size of
+    /// the collection.
     ///
-    /// The passed `index` must be lower than the size of the collection, i.e. a
-    /// call to [`push()`](Self::push) (or its variants) that returned `index`
-    /// must have happened before this function call. Otherwise, this
-    /// function panics.
-    fn index(&self, index: usize) -> &Self::Output {
-        assert!(index < self.len.load(Ordering::Acquire));
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     container.push(i);
+    /// }
+    ///
+    /// assert_eq!(container.try_index(13), Some(&13));
+    /// assert_eq!(container.try_index(41), Some(&41));
+    /// assert_eq!(container.try_index(42), None);
+    /// ```
+    pub fn try_index(&self, index: usize) -> Option<&T> {
+        if index >= self.len.load(Ordering::Acquire) {
+            return None;
+        }
         let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
 
         let bucket_ptr = self.buckets[bucket].load(Ordering::Relaxed) as *const T;
@@ -1489,36 +1977,53 @@ impl<T, const SLOTS: usize> Index<usize> for AppendVec<T, SLOTS> {
         // - ptr is valid for reads: the only write at the given index has
         //   happened before this read as ensured by the assertion with an
         //   Acquire load on the length at the beginning of this function.
-        unsafe { &*ptr }
+        let item = unsafe { &*ptr };
+        Some(item)
     }
-}
 
-impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
-    type Output = [T];
-
+    /// Attempts to obtain a reference to the slice at the given range.
+    ///
+    /// This returns [`None`] if the provided `index` range:
+    /// - is larger than the size of the collection,
+    /// - or isn't contained in a single contiguous bucket.
+    ///
     /// # Panics
     ///
-    /// The passed `index` range:
-    /// - must be correctly ordered, i.e. `index.start <= index.end`,
-    /// - must be lower than the size of the collection, i.e. a call to
-    ///   [`push_slice()`](Self::push_slice) (or its variants) that returned a
-    ///   superset of `index` must have happened before this function call,
-    /// - must be contained in a single contiguous bucket; this is always the
-    ///   case when passing a subset of a range returned by a previous call to
-    ///   [`push_slice()`](Self::push_slice).
+    /// This function panics if the provided `index` range isn't correctly
+    /// ordered, i.e. if `index.start > index.end`.
     ///
-    /// Otherwise, this function panics.
-    fn index(&self, index: Range<usize>) -> &Self::Output {
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     container.push(i);
+    /// }
+    ///
+    /// assert_eq!(container.try_index_slice(0..2), Some(&[0, 1][..]));
+    /// // Not in a single bucket.
+    /// assert_eq!(container.try_index_slice(0..10), None);
+    /// assert_eq!(container.try_index_slice(2..4), Some(&[2, 3][..]));
+    /// assert_eq!(container.try_index_slice(4..8), Some(&[4, 5, 6, 7][..]));
+    /// assert_eq!(container.try_index_slice(40..42), Some(&[40, 41][..]));
+    /// // Out of bounds.
+    /// assert_eq!(container.try_index_slice(40..43), None);
+    /// assert_eq!(container.try_index_slice(64..128), None);
+    /// ```
+    pub fn try_index_slice(&self, index: Range<usize>) -> Option<&[T]> {
         if index.start == index.end {
-            return &[];
+            return Some(&[]);
         }
 
         assert!(index.start <= index.end);
         let index_len = index.end - index.start;
 
-        assert!(index.end <= self.len.load(Ordering::Acquire));
+        if index.end > self.len.load(Ordering::Acquire) {
+            return None;
+        }
         let (bucket, bucket_index) = bucketize(index.start, self.bucket_offset);
-        assert!(index_len <= bucket_len(bucket, self.bucket_offset) - bucket_index);
+        if index_len > bucket_len(bucket, self.bucket_offset) - bucket_index {
+            return None;
+        }
 
         let bucket_ptr = self.buckets[bucket].load(Ordering::Relaxed) as *const T;
         debug_assert_ne!(bucket_ptr, std::ptr::null());
@@ -1551,7 +2056,60 @@ impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
         // - index_len * size_of::<T>() fits in an isize, as the checks within
         //   push() and its variants ensure that at most Self::MAX_LEN + 1 items
         //   are stored in this collection.
-        unsafe { std::slice::from_raw_parts(ptr, index_len) }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, index_len) };
+        Some(slice)
+    }
+}
+
+impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
+    fn drop(&mut self) {
+        let len = *self.len.get_mut();
+        self.clear(len);
+    }
+}
+
+impl<T, const SLOTS: usize> Index<usize> for AppendVec<T, SLOTS> {
+    type Output = T;
+
+    /// Obtain a reference to the item at the given index.
+    ///
+    /// # Panics
+    ///
+    /// The passed `index` must be lower than the size of the collection, i.e. a
+    /// call to [`push()`](Self::push) (or its variants) that returned `index`
+    /// must have happened before this function call. Otherwise, this
+    /// function panics. Use [`try_index()`](Self::try_index) for a fallible
+    /// API.
+    fn index(&self, index: usize) -> &Self::Output {
+        match self.try_index(index) {
+            Some(x) => x,
+            None => panic!("Invalid index {index} in AppendVec"),
+        }
+    }
+}
+
+impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
+    type Output = [T];
+
+    /// Obtain a reference to the slice at the given range.
+    ///
+    /// # Panics
+    ///
+    /// The passed `index` range:
+    /// - must be correctly ordered, i.e. `index.start <= index.end`,
+    /// - must be lower than the size of the collection, i.e. a call to
+    ///   [`push_slice()`](Self::push_slice) (or its variants) that returned a
+    ///   superset of `index` must have happened before this function call,
+    /// - must be contained in a single contiguous bucket; this is always the
+    ///   case when passing a subset of a range returned by a previous call to
+    ///   [`push_slice()`](Self::push_slice).
+    ///
+    /// Otherwise, this function panics.
+    fn index(&self, index: Range<usize>) -> &Self::Output {
+        match self.try_index_slice(index.clone()) {
+            Some(x) => x,
+            None => panic!("Invalid index {index:?} in AppendVec"),
+        }
     }
 }
 
