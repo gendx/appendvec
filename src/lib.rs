@@ -2120,8 +2120,9 @@ impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
 /// thread. This is to minimize the number of atomic operations, and to allow
 /// implementing [`ExactSizeIterator`].
 ///
-/// This is is [`Send`] and [`Sync`] if and only if `T` is [`Sync`], as sharing
-/// or sending this iterator allows retrieving const references to `T`.
+/// This is is [`Send`] if and only if `T` is [`Sync`], as sending this iterator
+/// allows retrieving const references to `T`. This is always [`Sync`], as
+/// sharing an iterator only allows to retrieve its length.
 pub struct AppendVecIter<'a, T, const SLOTS: usize> {
     inner: &'a AppendVec<T, SLOTS>,
     bucket_offset: u32,
@@ -2132,9 +2133,8 @@ pub struct AppendVecIter<'a, T, const SLOTS: usize> {
 
 // SAFETY: Sending an AppendVecIter allows retrieving a &T on another thread.
 unsafe impl<T: Sync, const SLOTS: usize> Send for AppendVecIter<'_, T, SLOTS> {}
-// SAFETY: One cannot do much by sharing an AppendVecIter, but at most it would
-// allow retrieving a &T on another thread.
-unsafe impl<T: Sync, const SLOTS: usize> Sync for AppendVecIter<'_, T, SLOTS> {}
+// SAFETY: Sharing an AppendVecIter only allows to query its length.
+unsafe impl<T, const SLOTS: usize> Sync for AppendVecIter<'_, T, SLOTS> {}
 
 impl<'a, T, const SLOTS: usize> Iterator for AppendVecIter<'a, T, SLOTS> {
     type Item = &'a T;
@@ -2193,8 +2193,9 @@ impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecIter<'_, T, SLOTS> {}
 /// [`push_slice_mut()`](AppendVec::push_slice_mut), this will also iterate over
 /// the potential padding items, as [`AppendVec`] doesn't keep track of these.
 ///
-/// This is is [`Send`] and [`Sync`] if and only if `T` is [`Sync`], as sharing
-/// or sending this iterator allows retrieving const references to `T`.
+/// This is is [`Send`] if and only if `T` is [`Sync`], as sending this iterator
+/// allows retrieving const references to `T`. This is always [`Sync`], as
+/// sharing an iterator only allows to retrieve its length.
 pub struct AppendVecChunksIter<'a, T, const SLOTS: usize> {
     inner: &'a AppendVec<T, SLOTS>,
     bucket_offset: u32,
@@ -2206,9 +2207,8 @@ pub struct AppendVecChunksIter<'a, T, const SLOTS: usize> {
 // SAFETY: Sending an AppendVecChunksIter allows retrieving a &[T] on another
 // thread.
 unsafe impl<T: Sync, const SLOTS: usize> Send for AppendVecChunksIter<'_, T, SLOTS> {}
-// SAFETY: One cannot do much by sharing an AppendVecChunksIter, but at most it
-// would allow retrieving a &[T] on another thread.
-unsafe impl<T: Sync, const SLOTS: usize> Sync for AppendVecChunksIter<'_, T, SLOTS> {}
+// SAFETY: Sharing an AppendVecChunksIter only allows to query its length.
+unsafe impl<T, const SLOTS: usize> Sync for AppendVecChunksIter<'_, T, SLOTS> {}
 
 impl<'a, T, const SLOTS: usize> Iterator for AppendVecChunksIter<'a, T, SLOTS> {
     type Item = &'a [T];
