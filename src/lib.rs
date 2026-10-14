@@ -593,6 +593,38 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         }
     }
 
+    /// Obtain a mutable iterator over this collection.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     let index = container.push_mut(i);
+    ///     assert_eq!(index, i);
+    /// }
+    ///
+    /// let it = container.iter_mut();
+    /// assert_eq!(it.len(), 42);
+    /// for x in it {
+    ///     *x *= 2;
+    /// }
+    ///
+    /// for (i, value) in container.iter().enumerate() {
+    ///     assert_eq!(*value, 2 * i);
+    /// }
+    /// ```
+    pub fn iter_mut(&mut self) -> AppendVecIterMut<'_, T, SLOTS> {
+        let bucket_offset = self.bucket_offset;
+        let len = *self.len.get_mut();
+        AppendVecIterMut {
+            inner: self,
+            bucket_offset,
+            len,
+            index: 0,
+            bucket_ptr: std::ptr::null_mut(),
+        }
+    }
+
     /// Obtain an iterator over contiguous chunks of items of this collection.
     ///
     /// Note that once this iterator has been created, it will not iterate over
@@ -637,6 +669,47 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         AppendVecChunksIter {
             inner: self,
             bucket_offset: self.bucket_offset,
+            bucket,
+            max_bucket,
+            max_index,
+        }
+    }
+
+    /// Obtain a mutable iterator over chunks in this collection.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..22 {
+    ///     let index = container.push_mut(i);
+    ///     assert_eq!(index, i);
+    /// }
+    ///
+    /// let it = container.iter_chunks_mut();
+    /// assert_eq!(it.len(), 5);
+    /// for chunk in it {
+    ///     chunk.rotate_left(1);
+    /// }
+    ///
+    /// let mut it = container.iter_chunks();
+    /// assert_eq!(it.next().unwrap(), &[1, 0]);
+    /// assert_eq!(it.next().unwrap(), &[3, 2]);
+    /// assert_eq!(it.next().unwrap(), &[5, 6, 7, 4]);
+    /// assert_eq!(it.next().unwrap(), &[9, 10, 11, 12, 13, 14, 15, 8]);
+    /// assert_eq!(it.next().unwrap(), &[17, 18, 19, 20, 21, 16]);
+    /// assert_eq!(it.next(), None);
+    /// ```
+    pub fn iter_chunks_mut(&mut self) -> AppendVecChunksIterMut<'_, T, SLOTS> {
+        let bucket_offset = self.bucket_offset;
+        let len = *self.len.get_mut();
+        let (bucket, (max_bucket, max_index)) = if len == 0 {
+            (bucket_offset as usize, (0, 0))
+        } else {
+            (0, bucketize(len - 1, bucket_offset))
+        };
+        AppendVecChunksIterMut {
+            inner: self,
+            bucket_offset,
             bucket,
             max_bucket,
             max_index,
@@ -2181,6 +2254,70 @@ impl<'a, T, const SLOTS: usize> Iterator for AppendVecIter<'a, T, SLOTS> {
 
 impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecIter<'_, T, SLOTS> {}
 
+/// Mutable iterator over an [`AppendVec`].
+///
+/// This is is [`Send`] if and only if `T` is [`Send`], as sending this iterator
+/// allows retrieving mutable references to `T`. This is always [`Sync`], as
+/// sharing an iterator only allows to retrieve its length.
+pub struct AppendVecIterMut<'a, T, const SLOTS: usize> {
+    inner: &'a mut AppendVec<T, SLOTS>,
+    bucket_offset: u32,
+    len: usize,
+    index: usize,
+    bucket_ptr: *mut T,
+}
+
+// SAFETY: Sending an AppendVecIterMut allows retrieving a &mut T on another
+// thread.
+unsafe impl<T: Send, const SLOTS: usize> Send for AppendVecIterMut<'_, T, SLOTS> {}
+// SAFETY: Sharing an AppendVecIterMut only allows to query its length.
+unsafe impl<T, const SLOTS: usize> Sync for AppendVecIterMut<'_, T, SLOTS> {}
+
+impl<'a, T, const SLOTS: usize> Iterator for AppendVecIterMut<'a, T, SLOTS> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == self.len {
+            None
+        } else {
+            let (bucket, bucket_index) = bucketize(self.index, self.bucket_offset);
+            self.index += 1;
+
+            if bucket_index == 0 {
+                self.bucket_ptr = *self.inner.buckets[bucket].get_mut();
+                debug_assert_ne!(self.bucket_ptr, std::ptr::null_mut());
+            }
+
+            // SAFETY:
+            // - all indices before self.len, including self.index, have been
+            //   pushed before the iterator was created,
+            // - bucket_index * size_of::<T>() fits in an isize, as the checks
+            //   within push() and push_mut() ensure that at most Self::MAX_LEN
+            //   + 1 items are stored in this collection,
+            // - the entire range between self.bucket_ptr and ptr is derived
+            //   from one allocation of bucket_len(bucket) items, as 0 <=
+            //   bucket_index < bucket_len(bucket).
+            let ptr = unsafe { self.bucket_ptr.add(bucket_index) };
+            // SAFETY:
+            // - ptr is properly aligned, non-null with correct provenance,
+            //   because it's derived from self.bucket_ptr which is itself
+            //   aligned as it was allocated from a boxed slice of Ts,
+            // - ptr is valid for reads: the given index is in bounds of
+            //   self.len,
+            // - ptr is valid for writes: the iterator has exclusive access to
+            //   the underlying AppendVec.
+            unsafe { Some(&mut *ptr) }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecIterMut<'_, T, SLOTS> {}
+
 /// Iterator over contiguous slices contained in an [`AppendVec`].
 ///
 /// Note that once this iterator has been created via the
@@ -2273,6 +2410,96 @@ impl<'a, T, const SLOTS: usize> Iterator for AppendVecChunksIter<'a, T, SLOTS> {
 }
 
 impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecChunksIter<'_, T, SLOTS> {}
+
+/// Iterator over contiguous mutable slices contained in an [`AppendVec`].
+///
+/// Note that if you inserted slices via [`push_slice()`](AppendVec::push_slice)
+/// or [`push_slice_mut()`](AppendVec::push_slice_mut), this will also iterate
+/// over the potential padding items, as [`AppendVec`] doesn't keep track of
+/// these.
+///
+/// This is is [`Send`] if and only if `T` is [`Send`], as sending this iterator
+/// allows retrieving mutable references to `T`. This is always [`Sync`], as
+/// sharing an iterator only allows to retrieve its length.
+pub struct AppendVecChunksIterMut<'a, T, const SLOTS: usize> {
+    inner: &'a mut AppendVec<T, SLOTS>,
+    bucket_offset: u32,
+    bucket: usize,
+    max_bucket: usize,
+    max_index: usize,
+}
+
+// SAFETY: Sending an AppendVecChunksIter allows retrieving a &mut [T] on
+// another thread.
+unsafe impl<T: Send, const SLOTS: usize> Send for AppendVecChunksIterMut<'_, T, SLOTS> {}
+// SAFETY: Sharing an AppendVecChunksIter only allows to query its length.
+unsafe impl<T, const SLOTS: usize> Sync for AppendVecChunksIterMut<'_, T, SLOTS> {}
+
+impl<'a, T, const SLOTS: usize> Iterator for AppendVecChunksIterMut<'a, T, SLOTS> {
+    type Item = &'a mut [T];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bucket > self.max_bucket {
+            None
+        } else {
+            let bucket_len = bucket_len(self.bucket, self.bucket_offset);
+            let bucket_items = if self.bucket != self.max_bucket {
+                bucket_len
+            } else {
+                self.max_index + 1
+            };
+
+            let bucket_ptr = *self.inner.buckets[self.bucket].get_mut();
+            debug_assert_ne!(bucket_ptr, std::ptr::null_mut());
+
+            self.bucket = if self.bucket == 0 {
+                self.bucket_offset as usize
+            } else {
+                self.bucket + 1
+            };
+
+            // SAFETY:
+            // - bucket_ptr is non-null, as this collection has an invariant
+            //   that all buckets until the length are non null, futher
+            //   confirmed by a debug assertion,
+            // - bucket_ptr is aligned as it derives from an allocation of type
+            //   [T],
+            // - bucket_ptr is valid for reads and writes of bucket_items items
+            //   of type T,
+            // - bucket_ptr points to bucket_items initialized values of type T,
+            //   as the AppendVec maintains the invariant that all items until
+            //   its length are initialized,
+            // - the memory isn't accessed through any other pointer for the
+            //   whole output lifetime, which is bound by the lifetime of the
+            //   underlying AppendVec,
+            // - bucket_items * size_of::<T>() fits in an isize, as the checks
+            //   within push() and its variants ensure that at most
+            //   Self::MAX_LEN + 1 items are stored in an AppendVec.
+            unsafe { Some(std::slice::from_raw_parts_mut(bucket_ptr, bucket_items)) }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        debug_assert!(self.bucket == 0 || self.bucket >= self.bucket_offset as usize);
+        let adjusted_bucket = if self.bucket == 0 {
+            0
+        } else {
+            self.bucket + 1 - self.bucket_offset as usize
+        };
+
+        debug_assert!(self.max_bucket == 0 || self.max_bucket >= self.bucket_offset as usize);
+        let adjusted_max_bucket = if self.max_bucket == 0 {
+            0
+        } else {
+            self.max_bucket + 1 - self.bucket_offset as usize
+        };
+
+        let remaining = adjusted_max_bucket + 1 - adjusted_bucket;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T, const SLOTS: usize> ExactSizeIterator for AppendVecChunksIterMut<'_, T, SLOTS> {}
 
 /// Decomposes the given `index` into the bucket that contains it and the index
 /// within that bucket.
