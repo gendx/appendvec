@@ -16,7 +16,7 @@ use crossbeam_utils::CachePadded;
 #[cfg(feature = "get-size2")]
 use get_size2::{GetSize, GetSizeTracker};
 use std::mem::MaybeUninit;
-use std::ops::{Index, Range};
+use std::ops::{Index, IndexMut, Range};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 pub use str::AppendStr;
@@ -2054,6 +2054,52 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         Some(item)
     }
 
+    /// Attempts to obtain a mutable reference to the item at the given index.
+    ///
+    /// This returns [`None`] if the provided `index` is larger than the size of
+    /// the collection.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     container.push_mut(i);
+    /// }
+    ///
+    /// assert_eq!(container.try_index_mut(13), Some(&mut 13));
+    /// assert_eq!(container.try_index_mut(41), Some(&mut 41));
+    /// assert_eq!(container.try_index_mut(42), None);
+    /// ```
+    pub fn try_index_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= *self.len.get_mut() {
+            return None;
+        }
+        let (bucket, bucket_index) = bucketize(index, self.bucket_offset);
+
+        let bucket_ptr = *self.buckets[bucket].get_mut();
+        debug_assert_ne!(bucket_ptr, std::ptr::null_mut());
+
+        // SAFETY:
+        // - the check at the beginning of this function ensures that the index
+        //   is in bounds,
+        // - bucket_index * size_of::<T>() fits in an isize, as the checks
+        //   within push() and its variants ensure that at most Self::MAX_LEN +
+        //   1 items are stored in this collection,
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
+        let ptr = unsafe { bucket_ptr.add(bucket_index) };
+        // SAFETY:
+        // - ptr is properly aligned, non-null with correct provenance, because
+        //   it's derived from bucket_ptr which is itself aligned as it was
+        //   allocated from a boxed slice of Ts,
+        // - ptr is valid for reads: the given index is in bounds of self.len,
+        // - ptr is valid for writes: the iterator has exclusive access to the
+        //   underlying AppendVec.
+        let item = unsafe { &mut *ptr };
+        Some(item)
+    }
+
     /// Attempts to obtain a reference to the slice at the given range.
     ///
     /// This returns [`None`] if the provided `index` range:
@@ -2132,6 +2178,90 @@ impl<T, const SLOTS: usize> AppendVec<T, SLOTS> {
         let slice = unsafe { std::slice::from_raw_parts(ptr, index_len) };
         Some(slice)
     }
+
+    /// Attempts to obtain a mutable reference to the slice at the given range.
+    ///
+    /// This returns [`None`] if the provided `index` range:
+    /// - is larger than the size of the collection,
+    /// - or isn't contained in a single contiguous bucket.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the provided `index` range isn't correctly
+    /// ordered, i.e. if `index.start > index.end`.
+    ///
+    /// ```
+    /// # use appendvec::AppendVec;
+    /// let mut container: AppendVec<_> = AppendVec::new();
+    /// for i in 0..42 {
+    ///     container.push_mut(i);
+    /// }
+    ///
+    /// assert_eq!(container.try_index_slice_mut(0..2), Some(&mut [0, 1][..]));
+    /// // Not in a single bucket.
+    /// assert_eq!(container.try_index_slice_mut(0..10), None);
+    /// assert_eq!(container.try_index_slice_mut(2..4), Some(&mut [2, 3][..]));
+    /// assert_eq!(
+    ///     container.try_index_slice_mut(4..8),
+    ///     Some(&mut [4, 5, 6, 7][..])
+    /// );
+    /// assert_eq!(
+    ///     container.try_index_slice_mut(40..42),
+    ///     Some(&mut [40, 41][..])
+    /// );
+    /// // Out of bounds.
+    /// assert_eq!(container.try_index_slice_mut(40..43), None);
+    /// assert_eq!(container.try_index_slice_mut(64..128), None);
+    /// ```
+    pub fn try_index_slice_mut(&mut self, index: Range<usize>) -> Option<&mut [T]> {
+        if index.start == index.end {
+            return Some(&mut []);
+        }
+
+        assert!(index.start <= index.end);
+        let index_len = index.end - index.start;
+
+        if index.end > *self.len.get_mut() {
+            return None;
+        }
+        let (bucket, bucket_index) = bucketize(index.start, self.bucket_offset);
+        if index_len > bucket_len(bucket, self.bucket_offset) - bucket_index {
+            return None;
+        }
+
+        let bucket_ptr = *self.buckets[bucket].get_mut();
+        debug_assert_ne!(bucket_ptr, std::ptr::null_mut());
+
+        // SAFETY:
+        // - the check that index.len <= self.len ensures that the range is in
+        //   bounds,
+        // - bucket_index * size_of::<T>() fits in an isize, as the checks
+        //   within push() and its variants ensure that at most Self::MAX_LEN +
+        //   1 items are stored in this collection,
+        // - the entire range between bucket_ptr and ptr is derived from one
+        //   allocation of bucket_len(bucket) items, as 0 <= bucket_index <
+        //   bucket_len(bucket).
+        let ptr = unsafe { bucket_ptr.add(bucket_index) };
+        // SAFETY:
+        // - ptr is non-null, as this collection has an invariant that all
+        //   buckets until the length are non null, futher confirmed by a debug
+        //   assertion,
+        //   - note that the index range isn't empty in this code branch,
+        // - ptr is aligned as it derives from the aligned bucket_ptr,
+        // - ptr is valid for reads and writes of index_len items of type T, as
+        //   confirmed by the assertion that bucket_index + index_len <=
+        //   bucket_len(bucket),
+        // - ptr points to index_len initialized values of type T, as the
+        //   collection maintains the invariant that all items until `self.len`
+        //   are initialized,
+        // - the memory isn't accessed through any other pointer for the whole
+        //   output lifetime, which is bound by the lifetime of this collection,
+        // - index_len * size_of::<T>() fits in an isize, as the checks within
+        //   push() and its variants ensure that at most Self::MAX_LEN + 1 items
+        //   are stored in this collection.
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, index_len) };
+        Some(slice)
+    }
 }
 
 impl<T, const SLOTS: usize> Drop for AppendVec<T, SLOTS> {
@@ -2161,6 +2291,22 @@ impl<T, const SLOTS: usize> Index<usize> for AppendVec<T, SLOTS> {
     }
 }
 
+impl<T, const SLOTS: usize> IndexMut<usize> for AppendVec<T, SLOTS> {
+    /// Obtain a mutable reference to the item at the given index.
+    ///
+    /// # Panics
+    ///
+    /// The passed `index` must be lower than the size of the collection,
+    /// otherwise this function panics. Use
+    /// [`try_index_mut()`](Self::try_index_mut) for a fallible API.
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        match self.try_index_mut(index) {
+            Some(x) => x,
+            None => panic!("Invalid index {index} in AppendVec"),
+        }
+    }
+}
+
 impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
     type Output = [T];
 
@@ -2180,6 +2326,28 @@ impl<T, const SLOTS: usize> Index<Range<usize>> for AppendVec<T, SLOTS> {
     /// Otherwise, this function panics.
     fn index(&self, index: Range<usize>) -> &Self::Output {
         match self.try_index_slice(index.clone()) {
+            Some(x) => x,
+            None => panic!("Invalid index {index:?} in AppendVec"),
+        }
+    }
+}
+
+impl<T, const SLOTS: usize> IndexMut<Range<usize>> for AppendVec<T, SLOTS> {
+    /// Obtain a mutable reference to the slice at the given range.
+    ///
+    /// # Panics
+    ///
+    /// The passed `index` range:
+    /// - must be correctly ordered, i.e. `index.start <= index.end`,
+    /// - must be lower than the size of the collection,
+    /// - must be contained in a single contiguous bucket; this is always the
+    ///   case when passing a subset of a range returned by a previous call to
+    ///   [`push_slice()`](Self::push_slice).
+    ///
+    /// Otherwise, this function panics. Use
+    /// [`try_index_slice_mut()`](Self::try_index_slice_mut) for a fallible API.
+    fn index_mut(&mut self, index: Range<usize>) -> &mut Self::Output {
+        match self.try_index_slice_mut(index.clone()) {
             Some(x) => x,
             None => panic!("Invalid index {index:?} in AppendVec"),
         }

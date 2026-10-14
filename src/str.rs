@@ -3,7 +3,7 @@
 use super::{AppendVec, bucket_len, bucketize};
 #[cfg(feature = "get-size2")]
 use get_size2::GetSize;
-use std::ops::{Index, Range};
+use std::ops::{Index, IndexMut, Range};
 use std::sync::atomic::Ordering;
 
 /// A concurrent append-only [`String`]-like container.
@@ -237,7 +237,8 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     ///   case when passing a subset of a range returned by a previous call to
     ///   [`push_str()`](Self::push_str).
     ///
-    /// Otherwise, this function panics.
+    /// Otherwise, this function panics. Use
+    /// [`try_get_bytes()`](Self::try_get_bytes) for a fallible API.
     ///
     /// ```
     /// # use appendvec::AppendStr;
@@ -253,6 +254,28 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
         &self.inner[index]
     }
 
+    /// Gets a mutable byte slice at the given index range, without checking
+    /// that they are valid UTF-8.
+    ///
+    /// Bypassing the UTF-8 check can be useful if you'll only look at bytes.
+    ///
+    /// # Panics
+    ///
+    /// The passed `index` range:
+    /// - must be correctly ordered, i.e. `index.start <= index.end`,
+    /// - must be lower than the size of the collection, i.e. a call to
+    ///   [`push_str()`](Self::push_str) (or its variants) that returned a
+    ///   superset of `index` must have happened before this function call,
+    /// - must be contained in a single contiguous bucket; this is always the
+    ///   case when passing a subset of a range returned by a previous call to
+    ///   [`push_str()`](Self::push_str).
+    ///
+    /// Otherwise, this function panics. Use
+    /// [`try_get_bytes_mut()`](Self::try_get_bytes_mut) for a fallible API.
+    pub fn get_bytes_mut(&mut self, index: Range<usize>) -> &mut [u8] {
+        &mut self.inner[index]
+    }
+
     /// Attempts to get the byte slice at the given index range, without
     /// checking that they are valid UTF-8.
     ///
@@ -266,8 +289,7 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// # Panics
     ///
     /// This function panics if the provided `index` range isn't correctly
-    /// ordered, i.e. if `index.start > index.end`. `index` range isn't
-    /// correctly ordered.
+    /// ordered, i.e. if `index.start > index.end`.
     ///
     /// ```
     /// # use appendvec::AppendStr;
@@ -288,6 +310,23 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
     /// ```
     pub fn try_get_bytes(&self, index: Range<usize>) -> Option<&[u8]> {
         self.inner.try_index_slice(index)
+    }
+
+    /// Attempts to get a mutable byte slice at the given index range, without
+    /// checking that they are valid UTF-8.
+    ///
+    /// Bypassing the UTF-8 check can be useful if you'll only look at bytes.
+    ///
+    /// This returns [`None`] if the provided `index` range:
+    /// - is larger than the size of the collection,
+    /// - or isn't contained in a single contiguous bucket.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the provided `index` range isn't correctly
+    /// ordered, i.e. if `index.start > index.end`.
+    pub fn try_get_bytes_mut(&mut self, index: Range<usize>) -> Option<&mut [u8]> {
+        self.inner.try_index_slice_mut(index)
     }
 
     /// Reduces the size of this collection to the given length.
@@ -408,11 +447,88 @@ impl<const SLOTS: usize> AppendStr<SLOTS> {
 
         bucket_str.get(bucket_index..bucket_index + index_len)
     }
+
+    /// Attempts to get a mutable string at the given index range.
+    ///
+    /// This returns [`None`] if the provided `index` range:
+    /// - is larger than the size of the collection,
+    /// - isn't contained in a single contiguous bucket,
+    /// - or doesn't fall on UTF-8 boundaries.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the provided `index` range isn't correctly
+    /// ordered, i.e. if `index.start > index.end`.
+    pub fn try_index_mut(&mut self, index: Range<usize>) -> Option<&mut str> {
+        if index.start == index.end {
+            let empty_slice = &mut [];
+            // SAFETY: TODO
+            let empty_str: &mut str = unsafe { std::str::from_utf8_unchecked_mut(empty_slice) };
+            return Some(empty_str);
+        }
+
+        assert!(index.start <= index.end);
+        let index_len = index.end - index.start;
+
+        let len = *self.inner.len.get_mut();
+        if index.end > len {
+            return None;
+        }
+
+        let (bucket, bucket_index) = bucketize(index.start, self.inner.bucket_offset);
+        let bucket_len = bucket_len(bucket, self.inner.bucket_offset);
+        if index_len > bucket_len - bucket_index {
+            return None;
+        }
+
+        let bucket_ptr = *self.inner.buckets[bucket].get_mut();
+        debug_assert_ne!(bucket_ptr, std::ptr::null_mut());
+
+        let (last_bucket, last_bucket_len) = bucketize(len, self.inner.bucket_offset);
+        let bucket_available_len = if bucket == last_bucket {
+            last_bucket_len
+        } else {
+            bucket_len
+        };
+
+        // SAFETY:
+        // - bucket_ptr is non-null, as this collection has an invariant that
+        //   all buckets until the length are non null, futher confirmed by a
+        //   debug assertion,
+        //   - note that the index range isn't empty in this code branch,
+        // - bucket_ptr is aligned as u8 has an alignment of 1,
+        // - bucket_ptr is valid for reads of bucket_available_len items of type
+        //   u8, as the length is the length of the bucket, clamped to the
+        //   current length if it is the last bucket,
+        // - bucket_ptr points to bucket_available_len initialized values of
+        //   type u8, as the collection maintains the invariant that all items
+        //   until `self.len` are initialized,
+        // - the memory isn't accessed through any other pointer for the whole
+        //   output lifetime, which is bound by the lifetime of this collection,
+        // - index_len * size_of::<u8>() fits in an isize, as the checks within
+        //   push() and its variants ensure that at most AppendVec::MAX_LEN + 1
+        //   items are stored in this collection.
+        let bucket_slice: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(bucket_ptr, bucket_available_len) };
+        // SAFETY:
+        // - the collection maintains the invariant that all full buckets are
+        //   valid UTF-8, as they are the concatenation of valid UTF-8 strings
+        //   (pushed via the public API) followed by padding of zeros (which is
+        //   also valid UTF-8),
+        // - likewise, the last bucket is valid UTF-8 until the collection
+        //   length, as it is the concatenation of valid UTF-8 strings that have
+        //   been pushed.
+        let bucket_str: &mut str = unsafe { std::str::from_utf8_unchecked_mut(bucket_slice) };
+
+        bucket_str.get_mut(bucket_index..bucket_index + index_len)
+    }
 }
 
 impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
     type Output = str;
 
+    /// Gets the string slice at the given index range.
+    ///
     /// # Panics
     ///
     /// The passed `index` range:
@@ -427,9 +543,37 @@ impl<const SLOTS: usize> Index<Range<usize>> for AppendStr<SLOTS> {
     ///   passing a range returned by a previous call to
     ///   [`push_str()`](Self::push_str).
     ///
-    /// Otherwise, this function panics.
+    /// Otherwise, this function panics. Use [`try_index()`](Self::try_index)
+    /// for a fallible API.
     fn index(&self, index: Range<usize>) -> &Self::Output {
         match self.try_index(index.clone()) {
+            Some(x) => x,
+            None => panic!("Invalid index {index:?} in AppendStr"),
+        }
+    }
+}
+
+impl<const SLOTS: usize> IndexMut<Range<usize>> for AppendStr<SLOTS> {
+    /// Gets a mutable string slice at the given index range.
+    ///
+    /// # Panics
+    ///
+    /// The passed `index` range:
+    /// - must be correctly ordered, i.e. `index.start <= index.end`,
+    /// - must be lower than the size of the collection, i.e. a call to
+    ///   [`push_str()`](Self::push_str) (or its variants) that returned a
+    ///   superset of `index` must have happened before this function call,
+    /// - must be contained in a single contiguous bucket; this is always the
+    ///   case when passing a subset of a range returned by a previous call to
+    ///   [`push_str()`](Self::push_str),
+    /// - must be fall on UTF-8 boundaries; this is always the case when exactly
+    ///   passing a range returned by a previous call to
+    ///   [`push_str()`](Self::push_str).
+    ///
+    /// Otherwise, this function panics. Use
+    /// [`try_index_mut()`](Self::try_index_mut) for a fallible API.
+    fn index_mut(&mut self, index: Range<usize>) -> &mut Self::Output {
+        match self.try_index_mut(index.clone()) {
             Some(x) => x,
             None => panic!("Invalid index {index:?} in AppendStr"),
         }
